@@ -400,6 +400,22 @@ describe("MarkdownBlock", () => {
       expect(container).toHaveTextContent("after");
     });
 
+    it.each([
+      ["img onerror", `<img src=x onerror=alert(1)>`],
+      ["svg onload", `<svg onload=alert(1)><circle r=1></circle></svg>`],
+      ["script", `<script>alert(1)</script>`],
+    ])("drops %s before it reaches React", (_name, html) => {
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      const container = renderHtml(html);
+      expect(container.querySelector("[onerror], [onload], svg, script")).toBeNull();
+      // React silently drops string handlers from the DOM, so the DOM alone
+      // cannot prove sanitization; its warning shows the handler got through.
+      expect(
+        consoleError.mock.calls.filter(([msg]) => String(msg).includes("listener to be a function")),
+      ).toEqual([]);
+      consoleError.mockRestore();
+    });
+
     it("strips inline styles from allowed tags", () => {
       const container = renderHtml(`<b style="position:fixed;inset:0">bold</b>`);
       const bold = container.querySelector("b");
