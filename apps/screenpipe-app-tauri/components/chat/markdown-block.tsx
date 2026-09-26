@@ -84,7 +84,11 @@ const chatRehypePlugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [
 export interface MarkdownBlockOptions {
   /** Extra parsing passes layered onto the main Chat Markdown pipeline. */
   additionalRemarkPlugins?: ReactMarkdownOptions["remarkPlugins"];
-  /** Extend the main Chat URL allowlist for a bounded embedded surface. */
+  /**
+   * Extend the main Chat URL allowlist for a bounded embedded surface. This is
+   * the only protocol check on href/src (the sanitizer defers to it), so it
+   * must still fall back to `chatUrlTransform` or react-markdown's default.
+   */
   urlTransform?: ReactMarkdownOptions["urlTransform"];
   /** Return a node for links owned by the embedding surface; undefined falls back to Chat. */
   renderLink?: (input: {
