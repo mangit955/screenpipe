@@ -14,6 +14,7 @@ const {
   copyTextToClipboardMock,
   toastMock,
   openViewerWindowMock,
+  getMediaFileMock,
   setPendingNavigationMock,
   showWindowMock,
   routeNotificationDeeplinkMock,
@@ -26,6 +27,10 @@ const {
   openViewerWindowMock: vi.fn(async (_path: string) => ({
     status: "ok" as const,
   })),
+  getMediaFileMock: vi.fn(async (_path: string) => ({
+    status: "error" as const,
+    error: "File does not exist",
+  })),
   setPendingNavigationMock: vi.fn(),
   showWindowMock: vi.fn(async () => ({ status: "ok" as const })),
   routeNotificationDeeplinkMock: vi.fn(async () => undefined),
@@ -36,6 +41,7 @@ vi.mock("@/lib/utils/tauri", () => ({
     ownedBrowserNavigate: ownedBrowserNavigateMock,
     copyTextToClipboard: copyTextToClipboardMock,
     openViewerWindow: openViewerWindowMock,
+    getMediaFile: getMediaFileMock,
     showWindow: showWindowMock,
   },
 }));
@@ -219,6 +225,28 @@ describe("MarkdownBlock", () => {
       "[&_th]:min-w-36",
       "[&_tr>*:first-child]:sticky",
     );
+  });
+
+  it("shows media names without a location as text instead of a failing player", () => {
+    const { container } = render(
+      <MarkdownBlock
+        text={`| File | Size |
+|---|---|
+| \`before-github.mp4\` | 2.6 MB |
+| \`after-github.mp4\` | 2.5 MB |
+
+![after](after-github.mp4)`}
+        isUser={false}
+      />,
+    );
+
+    expect(screen.getByText("before-github.mp4").tagName).toBe("CODE");
+    expect(screen.getAllByText("after-github.mp4").map((el) => el.tagName)).toEqual([
+      "CODE",
+      "CODE",
+    ]);
+    expect(container.querySelector("img, video, audio")).toBeNull();
+    expect(getMediaFileMock).not.toHaveBeenCalled();
   });
 
   it.each([

@@ -110,6 +110,11 @@ describe("isMediaFilePath", () => {
     expect(isMediaFilePath("https://example.com/demo.mp4")).toBe(false);
     expect(isMediaFilePath("//cdn.example.com/demo.mp4")).toBe(false);
   });
+
+  it("rejects text that is not one concrete file", () => {
+    expect(isMediaFilePath("/Users/me/a.mp4\n/Users/me/b.mp4")).toBe(false);
+    expect(isMediaFilePath("~/.screenpipe/data/monitor_*.mp4")).toBe(false);
+  });
 });
 
 describe("normalizeLocalMediaMarkdown", () => {

@@ -58,6 +58,23 @@ export function isAudioMediaPath(path: string): boolean {
 // network path, or a `file:` URL.
 const LOCAL_PATH_PREFIX = /^(?:\/(?!\/)|~[\\/]|[A-Z]:[\\/]|\\\\|file:\/)/i;
 const MEDIA_EXTENSION_SUFFIX = new RegExp(`\\.(${MEDIA_EXTENSION_PATTERN})$`, "i");
+// A code block listing several files, or a pattern like `monitor_*.mp4`, is
+// not one file to play.
+const NOT_ONE_FILE = /[\r\n*]/;
+
+/** Percent-decodes a markdown link address, keeping it as-is when malformed. */
+export function decodeLinkAddress(address: string): string {
+  try {
+    return decodeURIComponent(address);
+  } catch {
+    return address;
+  }
+}
+
+/** Whether `path` ends in an audio/video extension, wherever it points. */
+export function hasMediaExtension(path: string): boolean {
+  return MEDIA_EXTENSION_SUFFIX.test(path);
+}
 
 /**
  * Whether `path` names a local audio/video file the media reader can open.
@@ -67,13 +84,12 @@ const MEDIA_EXTENSION_SUFFIX = new RegExp(`\\.(${MEDIA_EXTENSION_PATTERN})$`, "i
 export function isMediaFilePath(path: string): boolean {
   // Markdown hands link addresses over percent-encoded (`C:%5CUsers`) and the
   // player decodes them before reading, so judge the decoded form.
-  let decoded = path;
-  try {
-    decoded = decodeURIComponent(path);
-  } catch {
-    // Keep the raw text when it contains malformed percent escapes.
-  }
-  return LOCAL_PATH_PREFIX.test(decoded) && MEDIA_EXTENSION_SUFFIX.test(decoded);
+  const decoded = decodeLinkAddress(path);
+  return (
+    LOCAL_PATH_PREFIX.test(decoded) &&
+    hasMediaExtension(decoded) &&
+    !NOT_ONE_FILE.test(decoded)
+  );
 }
 
 export function normalizeLocalMediaMarkdown(text: string): string {

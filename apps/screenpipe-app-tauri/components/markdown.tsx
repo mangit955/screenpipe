@@ -7,7 +7,13 @@ import { commands } from "@/lib/utils/tauri";
 import { MediaComponent } from "@/components/rewind/media";
 import { LocalMarkdownImage } from "@/components/markdown/local-markdown-image";
 import { imageMimeFromName } from "@/components/meeting-notes/image-utils";
-import { isMediaFilePath, normalizeLocalMediaMarkdown, normalizeMediaFilePath } from "@/lib/utils/media-file-path";
+import {
+  decodeLinkAddress,
+  hasMediaExtension,
+  isMediaFilePath,
+  normalizeLocalMediaMarkdown,
+  normalizeMediaFilePath,
+} from "@/lib/utils/media-file-path";
 
 function unwrapMarkdownUrl(url: string): string {
   const trimmed = url.trim();
@@ -182,6 +188,14 @@ export function createMediaAwareMarkdownComponents(
 
       if (isMediaFilePath(src)) {
         return <MediaComponent filePath={src} className="my-2" />;
+      }
+
+      // An <img> can't show audio or video, and the player can't open this
+      // address, so show it as text the same way an inline-code name renders.
+      if (hasMediaExtension(src)) {
+        const name = decodeLinkAddress(src);
+        const CustomCode = base.code;
+        return CustomCode ? <CustomCode>{name}</CustomCode> : <code>{name}</code>;
       }
 
       const localPath = resolveLocalPathFromMarkdownUrl(src);

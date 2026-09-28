@@ -38,6 +38,11 @@ describe("MemoizedReactMarkdown local media", () => {
     ["a bare extension", "any name ending in `.mp4`", [".mp4"]],
     ["a relative path", "saved to `clips/demo.mp4`", ["clips/demo.mp4"]],
     [
+      "a filename pattern",
+      "recordings are saved as `~/.screenpipe/data/monitor_*.mp4`",
+      ["~/.screenpipe/data/monitor_*.mp4"],
+    ],
+    [
       "bare filenames in a table",
       [
         "| File | Size |",
@@ -55,6 +60,33 @@ describe("MemoizedReactMarkdown local media", () => {
     for (const name of names) {
       expect(screen.getByText(name).tagName).toBe("CODE");
     }
+    expect(getMediaFileCommand).not.toHaveBeenCalled();
+  });
+
+  it("keeps a code block listing several recordings as text", () => {
+    const { container } = render(
+      <MemoizedReactMarkdown>
+        {"```\n/Users/me/Movies/a.mp4\n/Users/me/Movies/b.mp4\n```"}
+      </MemoizedReactMarkdown>,
+    );
+
+    expect(container.querySelector("pre code")?.textContent).toContain("/Users/me/Movies/b.mp4");
+    expect(getMediaFileCommand).not.toHaveBeenCalled();
+  });
+
+  // An <img> can never show audio or video, so a media address the reader
+  // can't open must not fall through to a broken image.
+  it.each([
+    ["a bare filename", "![after](after-github.mp4)", "after-github.mp4"],
+    ["a name with spaces", "![](<after github.mp4>)", "after github.mp4"],
+    ["a web address", "![clip](https://example.com/clip.webm)", "https://example.com/clip.webm"],
+  ])("shows an image-syntax video with %s as text", (_label, markdown, name) => {
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{markdown}</MemoizedReactMarkdown>,
+    );
+
+    expect(screen.getByText(name).tagName).toBe("CODE");
+    expect(container.querySelector("img")).toBeNull();
     expect(getMediaFileCommand).not.toHaveBeenCalled();
   });
 
