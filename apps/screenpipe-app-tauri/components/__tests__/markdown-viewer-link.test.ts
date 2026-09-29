@@ -147,6 +147,15 @@ describe("rewriteLocalMarkdownLinksForChat", () => {
     );
   });
 
+  it("never shortens a media link to a different file", () => {
+    // Cutting at the first media extension would name `/Users/me/Music/old.mp3`.
+    expect(rewriteLocalMarkdownLinksForChat("[clip](/Users/me/Music/old.mp3-files/clip.mp4)")).toBe(
+      "[clip](screenpipe://view?path=%2FUsers%2Fme%2FMusic%2Fold.mp3-files%2Fclip.mp4)",
+    );
+    const image = "![clip](/Users/me/Music/old.mp3-files/clip.mp4)";
+    expect(rewriteLocalMarkdownLinksForChat(image)).toBe(image);
+  });
+
   it("opens a document whose name contains a media extension in the viewer, not a player", () => {
     expect(rewriteLocalMarkdownLinksForChat("[notes](/Users/me/clip.mp4.txt)")).toBe(
       "[notes](screenpipe://view?path=%2FUsers%2Fme%2Fclip.mp4.txt)",

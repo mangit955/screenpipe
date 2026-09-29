@@ -248,6 +248,20 @@ describe("MarkdownBlock", () => {
     expect(getMediaFileMock).not.toHaveBeenCalled();
   });
 
+  it("never plays a different file than a chat link names", () => {
+    const { container } = render(
+      <MarkdownBlock
+        text={`[clip](/Users/me/Music/old.mp3-files/clip.mp4)
+
+![clip](/Users/me/Music/old.mp3-files/clip.mp4)`}
+        isUser={false}
+      />,
+    );
+
+    expect(container.querySelector("video, audio")).toBeNull();
+    expect(getMediaFileMock).not.toHaveBeenCalled();
+  });
+
   it("shows a missing recording as code, and at once after switching back to the chat", async () => {
     vi.useFakeTimers();
     const path = "/Users/me/.screenpipe/data/monitor_1_2026-09-28_10-30-00.mp4";

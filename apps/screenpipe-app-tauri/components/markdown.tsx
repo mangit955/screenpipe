@@ -122,11 +122,12 @@ function wrapPathForMarkdown(path: string): string {
 function rewriteLocalMediaLinksForChat(text: string): string {
   return text.replace(
     /(!?)\[([^\]]*)\]\(((?:file:\/\/\/?[^\n\r]+?|\/[^\n\r]+?|[A-Z]:[\\/][^\n\r]+?)\.(mp4|mp3|wav|webm|ogg|m4a))\)/gi,
-    (_match, sigil: string, label: string, rawPath: string) => {
-      const localPath =
-        resolveLocalPathFromMarkdownUrl(rawPath) ?? normalizeMediaFilePath(rawPath.trim());
-      const normalizedPath = normalizeMediaFilePath(localPath);
-      return `${sigil}[${label}](${wrapPathForMarkdown(normalizedPath)})`;
+    (match, sigil: string, label: string, rawPath: string) => {
+      // Rewrite only a path the player reads whole. Shortening anything else
+      // (`/Music/old.mp3-files/clip.mp4`) would name a different file.
+      const localPath = resolveLocalPathFromMarkdownUrl(rawPath);
+      if (!localPath || !isMediaFilePath(localPath)) return match;
+      return `${sigil}[${label}](${wrapPathForMarkdown(normalizeMediaFilePath(localPath))})`;
     },
   );
 }
