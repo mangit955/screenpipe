@@ -27,7 +27,9 @@ describe("MediaComponent", () => {
     getMediaFileCommand.mockReset();
   });
 
-  it("keeps the error box for a recording that can't be read, and shows it at once when mounted again", async () => {
+  // Meeting and transcript players have no text to show instead, so a file
+  // that failed before gets the full loading and retries again.
+  it("retries a recording with no fallback in full each time it is mounted", async () => {
     const path = "/Users/me/.screenpipe/data/Mic (input)_2026-09-28_10-30-00.mp4";
     const first = render(<MediaComponent filePath={path} />);
     await act(() => vi.advanceTimersByTimeAsync(RETRIES_DONE_MS));
@@ -35,9 +37,14 @@ describe("MediaComponent", () => {
     expect(screen.getByText(/Failed to load media/)).toBeInTheDocument();
     expect(getMediaFileCommand).toHaveBeenCalledTimes(4);
     first.unmount();
+    getMediaFileCommand.mockClear();
 
     render(<MediaComponent filePath={path} />);
+    expect(screen.getByText("Loading media...")).toBeInTheDocument();
+    expect(screen.queryByText(/Failed to load media/)).toBeNull();
+
+    await act(() => vi.advanceTimersByTimeAsync(RETRIES_DONE_MS));
     expect(screen.getByText(/Failed to load media/)).toBeInTheDocument();
-    expect(screen.queryByText("Loading media...")).toBeNull();
+    expect(getMediaFileCommand).toHaveBeenCalledTimes(4);
   });
 });

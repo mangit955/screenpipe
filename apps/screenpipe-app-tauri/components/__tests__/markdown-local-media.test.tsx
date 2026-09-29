@@ -89,12 +89,6 @@ describe("MemoizedReactMarkdown local media", () => {
   it.each([
     ["a bare filename", "![after](after-github.mp4)", "after-github.mp4"],
     ["a name with spaces", "![](<after github.mp4>)", "after github.mp4"],
-    ["a web address", "![clip](https://example.com/clip.webm)", "https://example.com/clip.webm"],
-    [
-      "a web address with a query",
-      "![clip](https://example.com/clip.mp4?t=1)",
-      "https://example.com/clip.mp4?t=1",
-    ],
   ])("shows an image-syntax video with %s as text", (_label, markdown, name) => {
     const { container } = render(
       <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{markdown}</MemoizedReactMarkdown>,
@@ -105,17 +99,35 @@ describe("MemoizedReactMarkdown local media", () => {
     expect(getMediaFileCommand).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["https://example.com/clip.webm"],
+    ["https://example.com/clip.mp4?t=1"],
+  ])("opens an image-syntax web video at %s as a link", (src) => {
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {`![clip](${src})`}
+      </MemoizedReactMarkdown>,
+    );
+
+    expect(screen.getByRole("link", { name: "clip" })).toHaveAttribute("href", src);
+    expect(container.querySelector("img")).toBeNull();
+    expect(getMediaFileCommand).not.toHaveBeenCalled();
+  });
+
   // Nothing in the app resolves a relative address, so such a link would do
   // nothing when clicked.
   it.each([
-    ["a bare filename", "Watch [after](after-github.mp4) now"],
-    ["a relative path with a fragment", "Watch [after](clips/after-github.mp4#t=3) now"],
-  ])("keeps a link to %s as plain text", (_label, markdown) => {
+    ["a bare filename", "after-github.mp4"],
+    ["a relative path with a fragment", "clips/after-github.mp4#t=3"],
+  ])("shows a link to %s as its words and address", (_label, address) => {
     const { container } = render(
-      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{markdown}</MemoizedReactMarkdown>,
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {`Watch [after](${address}) now`}
+      </MemoizedReactMarkdown>,
     );
 
-    expect(container.textContent).toBe("Watch after now");
+    expect(container.textContent).toBe(`Watch after ${address} now`);
+    expect(screen.getByText(address).tagName).toBe("CODE");
     expect(screen.queryByRole("link")).toBeNull();
     expect(getMediaFileCommand).not.toHaveBeenCalled();
   });
@@ -195,26 +207,29 @@ describe("MemoizedReactMarkdown local media", () => {
       [
         "inline code",
         "saved to `/Users/me/Movies/missing-code.mp4`",
-        "/Users/me/Movies/missing-code.mp4",
-        "CODE",
+        "saved to /Users/me/Movies/missing-code.mp4",
       ],
       [
         "a link",
-        "[the recording](</Users/me/Movies/missing-link.mp4>)",
-        "the recording",
-        "P",
+        "Here is [the recording](</Users/me/Movies/missing-link.mp4>).",
+        "Here is the recording /Users/me/Movies/missing-link.mp4.",
+      ],
+      [
+        "a link named by its own path",
+        "Here is [/Users/me/Movies/missing-self.mp4](/Users/me/Movies/missing-self.mp4).",
+        "Here is /Users/me/Movies/missing-self.mp4.",
       ],
       [
         "an image",
         "![clip](</Users/me/Movies/missing-image.mp4>)",
         "/Users/me/Movies/missing-image.mp4",
-        "CODE",
       ],
-    ])("shows %s as the text it was written as", async (_label, markdown, text, tagName) => {
-      renderMarkdown(markdown);
+    ])("shows %s as text that keeps the path", async (_label, markdown, text) => {
+      const { container } = renderMarkdown(markdown);
       await act(() => vi.advanceTimersByTimeAsync(RETRIES_DONE_MS));
 
-      expect(screen.getByText(text).tagName).toBe(tagName);
+      expect(container.textContent).toBe(text);
+      expect(container.querySelector("code")?.textContent).toMatch(/^\/Users\/me\/Movies\/missing-/);
       expect(screen.queryByRole("link")).toBeNull();
       expect(screen.queryByText(/Failed to load media/)).toBeNull();
     });

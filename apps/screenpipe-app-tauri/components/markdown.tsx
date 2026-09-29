@@ -1,6 +1,6 @@
 // screenpipe — AI that knows everything you've seen, said, or heard
 // https://screenpipe.com
-import { FC, memo } from 'react'
+import { FC, isValidElement, memo, type ReactNode } from 'react'
 import ReactMarkdown, { defaultUrlTransform, Options } from 'react-markdown'
 import { commands } from "@/lib/utils/tauri";
 import { MediaComponent } from "@/components/rewind/media";
@@ -163,6 +163,14 @@ type MarkdownComponents = NonNullable<Options["components"]>;
 // two letters before the colon keeps a Windows drive (`C:`) from matching.
 const WEB_ADDRESS = /^(?:[a-z][a-z\d+.-]+:|\/\/)/i;
 
+// The words a node renders, such as a link's label.
+function textOf(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) return textOf(node.props.children);
+  return "";
+}
+
 function normalizeMarkdownChildren(children: Options["children"]): Options["children"] {
   if (typeof children === "string") {
     return normalizeLocalMediaMarkdown(children);
@@ -182,36 +190,51 @@ export function createMediaAwareMarkdownComponents(
     return CustomCode ? <CustomCode>{name}</CustomCode> : <code>{name}</code>;
   };
 
+  // A media link with nothing to play keeps its words and shows the address
+  // it named, once if the words are that address. Nothing in the app opens a
+  // relative address, so leaving it a link would do nothing when clicked.
+  const mediaLinkAsText = (address: string, words: ReactNode) =>
+    textOf(words).trim() === decodeLinkAddress(address).trim() ? (
+      mediaNameAsText(address)
+    ) : (
+      <>{words} {mediaNameAsText(address)}</>
+    );
+
+  const link = (href: string | undefined, children: ReactNode, props = {}) => {
+    const CustomAnchor = base.a;
+    if (CustomAnchor) {
+      return <CustomAnchor href={href} {...props}>{children}</CustomAnchor>;
+    }
+    return <a href={href} {...props}>{children}</a>;
+  };
+
   return {
     ...base,
     a({ href, children, ...props }) {
-      // Nothing in the app opens a relative address, so a link to media that
-      // can't play would do nothing when clicked; keep its words as text.
-      const linkText = <>{children}</>;
       if (href && isMediaFilePath(href)) {
-        return <MediaComponent filePath={href} className="my-2" fallback={linkText} />;
+        return (
+          <MediaComponent
+            filePath={href}
+            className="my-2"
+            fallback={mediaLinkAsText(href, children)}
+          />
+        );
       }
       if (href && isMediaAddress(href) && !WEB_ADDRESS.test(href)) {
-        return linkText;
+        return mediaLinkAsText(href, children);
       }
-
-      const CustomAnchor = base.a;
-      if (CustomAnchor) {
-        return <CustomAnchor href={href} {...props}>{children}</CustomAnchor>;
-      }
-
-      return <a href={href} {...props}>{children}</a>;
+      return link(href, children, props);
     },
     img({ src, alt, ...props }) {
       if (!src) return null;
 
-      // An <img> can't show audio or video, so a media address either plays
-      // or reads as its name.
+      // An <img> can't show audio or video, so a media address plays, opens
+      // as a web link, or reads as its name.
       if (isMediaFilePath(src)) {
         return <MediaComponent filePath={src} className="my-2" fallback={mediaNameAsText(src)} />;
       }
       if (isMediaAddress(src)) {
-        return mediaNameAsText(src);
+        return WEB_ADDRESS.test(src) ? link(src, alt || src) : mediaNameAsText(src);
       }
 
       const localPath = resolveLocalPathFromMarkdownUrl(src);

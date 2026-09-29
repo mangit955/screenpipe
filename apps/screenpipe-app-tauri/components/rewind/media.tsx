@@ -22,8 +22,10 @@ const mediaCache = new Map<string, CachedMedia>();
 const activeMediaSrcRefs = new Map<string, number>();
 
 // Paths that still failed after every retry, with the error shown for them.
-// Mounting one again (e.g. switching back to a chat) shows that error at once
-// and checks the file a single time instead of retrying for seconds.
+// A player with text to show instead (the chat) mounting one again shows that
+// text at once and checks the file a single time instead of retrying for
+// seconds. A player with nothing else to show (meeting audio) keeps loading
+// and retrying as usual.
 const failedMedia = new Map<string, string>();
 
 function rememberFailedMedia(filePath: string, error: string) {
@@ -97,7 +99,10 @@ export const MediaComponent = memo(function MediaComponent({
 
   const ui = useGT();
   const initialPath = normalizeMediaFilePath(filePath);
-  const [error, setError] = useState<string | null>(() => failedMedia.get(initialPath) ?? null);
+  const hasFallback = fallback !== undefined;
+  const [error, setError] = useState<string | null>(() =>
+    hasFallback ? failedMedia.get(initialPath) ?? null : null,
+  );
   const initialCachedMedia = getCachedMedia(initialPath);
   const [isAudio, setIsAudio] = useState(() => initialCachedMedia?.isAudio ?? isAudioMediaPath(initialPath));
   const [mimeType, setMimeType] = useState<string | null>(() => initialCachedMedia?.mimeType ?? null);
@@ -121,9 +126,9 @@ export const MediaComponent = memo(function MediaComponent({
     let isCancelled = false;
     let retryTimeout: NodeJS.Timeout | null = null;
     const initialSanitizedPath = sanitizeFilePath(filePath);
-    // A file that already failed shows its error straight away and is checked
-    // once more, in case it has appeared since.
-    const knownFailure = failedMedia.get(initialSanitizedPath) ?? null;
+    // A file that already failed shows the fallback straight away and is
+    // checked once more, in case it has appeared since.
+    const knownFailure = hasFallback ? failedMedia.get(initialSanitizedPath) ?? null : null;
     const maxRetries = knownFailure ? 0 : MAX_RETRIES;
 
     async function loadMedia(attempt: number = 0) {
@@ -215,7 +220,7 @@ export const MediaComponent = memo(function MediaComponent({
         clearTimeout(retryTimeout);
       }
     };
-  }, [filePath, sanitizeFilePath]);
+  }, [filePath, sanitizeFilePath, hasFallback]);
 
   useEffect(() => {
     if (!mediaSrc) return;
