@@ -121,6 +121,32 @@ describe("isMediaFilePath", () => {
     expect(isMediaFilePath("/Users/me/a.mp4\n/Users/me/b.mp4")).toBe(false);
     expect(isMediaFilePath("~/.screenpipe/data/monitor_*.mp4")).toBe(false);
     expect(isMediaFilePath("~/.screenpipe/data/monitor_<id>.mp4")).toBe(false);
+    expect(isMediaFilePath("~/.screenpipe/data/*.mp4")).toBe(false);
+    expect(isMediaFilePath("/Users/me/Movies/clip*.mp4")).toBe(false);
+    expect(
+      isMediaFilePath("~/.screenpipe/data/MacBook Pro Microphone (input)_2026-09-29_10-*-00.mp4"),
+    ).toBe(false);
+    expect(isMediaFilePath("~/.screenpipe/data/<device> (input)_<timestamp>.mp4")).toBe(false);
+  });
+
+  it("accepts a device recording whose name has <, > or *", () => {
+    // Audio recordings are named after the device, and a Bluetooth device can
+    // be renamed to anything.
+    expect(
+      isMediaFilePath("/Users/me/.screenpipe/data/Sam's Buds <3 (input)_2026-09-29_10-00-00.mp4"),
+    ).toBe(true);
+    expect(
+      isMediaFilePath("/Users/me/.screenpipe/data/Mic > Loopback (input)_2026-09-29_10-00-00.mp4"),
+    ).toBe(true);
+    expect(
+      isMediaFilePath("/Users/me/.screenpipe/data/Beats*Pro (input)_2026-09-29_10-00-00.mp4"),
+    ).toBe(true);
+    expect(
+      isMediaFilePath("/Users/me/.screenpipe/data/*NSYNC Speaker (output)_2026-09-29_10-00-00.mp4"),
+    ).toBe(true);
+    expect(
+      isMediaFilePath("/Users/me/.screenpipe/data/Mic <-> Loopback (input)_2026-09-29_10-00-00.mp4"),
+    ).toBe(true);
   });
 
   it("rejects several paths written on one line", () => {

@@ -279,6 +279,16 @@ describe("MarkdownBlock", () => {
     unmount();
   });
 
+  it("plays a link to a recording whose device name has <3", () => {
+    const recording = "/Users/me/.screenpipe/data/Sam's Buds <3 (input)_2026-09-29_10-00-00.mp4";
+    const { unmount } = render(
+      <MarkdownBlock text={`Here is [the recording](${recording}).`} isUser={false} />,
+    );
+
+    expect(getMediaFileMock.mock.calls).toEqual([[recording]]);
+    unmount();
+  });
+
   it("shows a missing recording as code, and at once after switching back to the chat", async () => {
     vi.useFakeTimers();
     const path = "/Users/me/.screenpipe/data/monitor_1_2026-09-28_10-30-00.mp4";

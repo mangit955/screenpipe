@@ -70,9 +70,12 @@ export function isAudioMediaPath(path: string): boolean {
 // network path. A `file:` URL is unwrapped into one of these first.
 const LOCAL_PATH_PREFIX = /^(?:\/(?!\/)|~[\\/]|[A-Z]:[\\/]|\\\\)/i;
 const MEDIA_EXTENSION_SUFFIX = new RegExp(`\\.(${MEDIA_EXTENSION_PATTERN})$`, "i");
-// A code block listing several files, a pattern like `monitor_*.mp4`, or a
-// placeholder like `monitor_<id>.mp4` is not one file to play.
-const NOT_ONE_FILE = /[\r\n*<>]/;
+// Not one file to play: several lines listing files, a placeholder
+// (`monitor_<id>.mp4`), or a wildcard `*` before a separator (`monitor_*.mp4`,
+// `*.mp4`, `10-*-00`). Only those shapes count, because audio recordings are
+// named after the device and a device name can hold other `<`, `>` or `*`
+// (`Sam's Buds <3 (input)_….mp4`, `*NSYNC Speaker (output)_….mp4`).
+const NOT_ONE_FILE = /[\r\n]|<[a-z][^<>]*>|\*[-_./\\]/i;
 
 /**
  * Whether `path` names one local audio/video file the media reader can open.
@@ -127,7 +130,7 @@ export function normalizeLocalMediaMarkdown(text: string): string {
       if (trimmedPath.startsWith("<") && trimmedPath.endsWith(">")) {
         return `${sigil}[${alt}](${trimmedPath})`;
       }
-      return `${sigil}[${alt}](<${trimmedPath.replace(/>/g, "%3E")}>)`;
+      return `${sigil}[${alt}](<${trimmedPath.replace(/</g, "%3C").replace(/>/g, "%3E")}>)`;
     },
   );
 }

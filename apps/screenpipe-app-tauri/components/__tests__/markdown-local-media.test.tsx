@@ -185,6 +185,27 @@ describe("MemoizedReactMarkdown local media", () => {
     expect(getMediaFileCommand).toHaveBeenCalledWith(path);
   });
 
+  // Audio recordings are named after the device, which can hold a `<`.
+  it.each([
+    [
+      "inline code",
+      "/Users/me/.screenpipe/data/Sam's Buds <3 (input)_2026-09-29_10-00-00.mp4",
+      (path: string) => `\`${path}\``,
+    ],
+    [
+      "a link",
+      "/Users/me/.screenpipe/data/Sam's Buds <3 (input)_2026-09-29_10-00-01.mp4",
+      (path: string) => `[the recording](${path})`,
+    ],
+  ])("plays a device recording whose name has <3, written as %s", async (_label, path, write) => {
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{write(path)}</MemoizedReactMarkdown>,
+    );
+
+    await waitFor(() => expect(container.querySelector("audio")).not.toBeNull());
+    expect(getMediaFileCommand).toHaveBeenCalledWith(path);
+  });
+
   describe("when the file can't be read", () => {
     // Long enough for the player to use up all of its retries.
     const RETRIES_DONE_MS = 4_000;

@@ -116,8 +116,9 @@ export async function openScreenpipeViewerLink(href: string): Promise<boolean> {
   return true;
 }
 
+// A `<…>` link address can't hold `<` or `>`, and a device name can.
 function wrapPathForMarkdown(path: string): string {
-  return `<${path.replace(/>/g, "%3E")}>`;
+  return `<${path.replace(/</g, "%3C").replace(/>/g, "%3E")}>`;
 }
 
 function rewriteLocalMediaLinksForChat(text: string): string {
