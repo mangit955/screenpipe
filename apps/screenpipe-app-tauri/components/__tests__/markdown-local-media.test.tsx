@@ -87,13 +87,14 @@ describe("MemoizedReactMarkdown local media", () => {
   // An <img> can never show audio or video, so a media address the reader
   // can't open must not fall through to a broken image.
   it.each([
-    ["a bare filename", "![after](after-github.mp4)", "after-github.mp4"],
-    ["a name with spaces", "![](<after github.mp4>)", "after github.mp4"],
-  ])("shows an image-syntax video with %s as text", (_label, markdown, name) => {
+    ["a bare filename", "![after](after-github.mp4)", "after-github.mp4", "after after-github.mp4"],
+    ["a name with spaces", "![](<after github.mp4>)", "after github.mp4", "after github.mp4"],
+  ])("shows an image-syntax video with %s as text", (_label, markdown, name, text) => {
     const { container } = render(
       <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{markdown}</MemoizedReactMarkdown>,
     );
 
+    expect(container.textContent).toBe(text);
     expect(screen.getByText(name).tagName).toBe("CODE");
     expect(container.querySelector("img")).toBeNull();
     expect(getMediaFileCommand).not.toHaveBeenCalled();
@@ -129,6 +130,17 @@ describe("MemoizedReactMarkdown local media", () => {
     expect(container.textContent).toBe(`Watch after ${address} now`);
     expect(screen.getByText(address).tagName).toBe("CODE");
     expect(screen.queryByRole("link")).toBeNull();
+    expect(getMediaFileCommand).not.toHaveBeenCalled();
+  });
+
+  it("shows a link with no words as its address alone", () => {
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>
+        {"Watch [](after-github.mp4) now"}
+      </MemoizedReactMarkdown>,
+    );
+
+    expect(container.textContent).toBe("Watch after-github.mp4 now");
     expect(getMediaFileCommand).not.toHaveBeenCalled();
   });
 
@@ -243,7 +255,12 @@ describe("MemoizedReactMarkdown local media", () => {
       [
         "an image",
         "![clip](</Users/me/Movies/missing-image.mp4>)",
-        "/Users/me/Movies/missing-image.mp4",
+        "clip /Users/me/Movies/missing-image.mp4",
+      ],
+      [
+        "an image with no alt text",
+        "![](</Users/me/Movies/missing-no-alt.mp4>)",
+        "/Users/me/Movies/missing-no-alt.mp4",
       ],
     ])("shows %s as text that keeps the path", async (_label, markdown, text) => {
       const { container } = renderMarkdown(markdown);

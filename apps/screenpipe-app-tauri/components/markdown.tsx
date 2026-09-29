@@ -191,15 +191,18 @@ export function createMediaAwareMarkdownComponents(
     return CustomCode ? <CustomCode>{name}</CustomCode> : <code>{name}</code>;
   };
 
-  // A media link with nothing to play keeps its words and shows the address
-  // it named, once if the words are that address. Nothing in the app opens a
-  // relative address, so leaving it a link would do nothing when clicked.
-  const mediaLinkAsText = (address: string, words: ReactNode) =>
-    textOf(words).trim() === decodeLinkAddress(address).trim() ? (
+  // A media link or image with nothing to play keeps its words (an image's
+  // alt text) and shows the address it named, alone if the words are empty or
+  // that address. Nothing in the app opens a relative address, so leaving it
+  // a link would do nothing when clicked.
+  const mediaLinkAsText = (address: string, words: ReactNode) => {
+    const said = textOf(words).trim();
+    return !said || said === decodeLinkAddress(address).trim() ? (
       mediaNameAsText(address)
     ) : (
       <>{words} {mediaNameAsText(address)}</>
     );
+  };
 
   const link = (href: string | undefined, children: ReactNode, props = {}) => {
     const CustomAnchor = base.a;
@@ -230,12 +233,12 @@ export function createMediaAwareMarkdownComponents(
       if (!src) return null;
 
       // An <img> can't show audio or video, so a media address plays, opens
-      // as a web link, or reads as its name.
+      // as a web link, or reads as text.
       if (isMediaFilePath(src)) {
-        return <MediaComponent filePath={src} className="my-2" fallback={mediaNameAsText(src)} />;
+        return <MediaComponent filePath={src} className="my-2" fallback={mediaLinkAsText(src, alt)} />;
       }
       if (isMediaAddress(src)) {
-        return WEB_ADDRESS.test(src) ? link(src, alt || src) : mediaNameAsText(src);
+        return WEB_ADDRESS.test(src) ? link(src, alt || src) : mediaLinkAsText(src, alt);
       }
 
       const localPath = resolveLocalPathFromMarkdownUrl(src);
