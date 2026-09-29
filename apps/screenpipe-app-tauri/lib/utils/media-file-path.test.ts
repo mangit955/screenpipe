@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isAudioMediaPath,
+  isMediaAddress,
   isMediaFilePath,
   normalizeLocalMediaMarkdown,
   normalizeMediaFilePath,
@@ -95,6 +96,11 @@ describe("isMediaFilePath", () => {
     expect(isMediaFilePath("c:/Users/me/clip.mp4")).toBe(true);
     expect(isMediaFilePath("file:///Users/me/clip.mp4")).toBe(true);
     expect(isMediaFilePath(String.raw`\\nas\recordings\clip.mp4`)).toBe(true);
+    expect(
+      isMediaFilePath("/Users/ansh/.screenpipe/data/System Audio (output)_2026-05-25_11-27-00.mp4"),
+    ).toBe(true);
+    // The player strips wrapping quotes before reading, so the path inside counts.
+    expect(isMediaFilePath('"/Users/me/clip.mp4"')).toBe(true);
   });
 
   it("reads percent-encoded link addresses the way the media reader will", () => {
@@ -114,6 +120,31 @@ describe("isMediaFilePath", () => {
   it("rejects text that is not one concrete file", () => {
     expect(isMediaFilePath("/Users/me/a.mp4\n/Users/me/b.mp4")).toBe(false);
     expect(isMediaFilePath("~/.screenpipe/data/monitor_*.mp4")).toBe(false);
+    expect(isMediaFilePath("~/.screenpipe/data/monitor_<id>.mp4")).toBe(false);
+  });
+
+  it("rejects several paths written on one line", () => {
+    expect(isMediaFilePath("/Users/me/a.mp4, /Users/me/b.mp4")).toBe(false);
+    expect(isMediaFilePath("~/a.mp4 ~/b.mp4")).toBe(false);
+    expect(isMediaFilePath(String.raw`C:\clips\a.mp4 C:\clips\b.mp4`)).toBe(false);
+  });
+
+  it("rejects a path the player would read only part of", () => {
+    // The player stops at the first media extension and would open `/Users/me/clip.mp4`.
+    expect(isMediaFilePath("/Users/me/clip.mp4.old.mp4")).toBe(false);
+  });
+});
+
+describe("isMediaAddress", () => {
+  it("recognizes a media address wherever it points", () => {
+    expect(isMediaAddress("demo.mp4")).toBe(true);
+    expect(isMediaAddress("https://example.com/clip.mp4?t=1")).toBe(true);
+    expect(isMediaAddress("clips/demo.WEBM#t=30")).toBe(true);
+  });
+
+  it("ignores an extension that only appears in the query or the middle", () => {
+    expect(isMediaAddress("https://example.com/cover.png?from=clip.mp4")).toBe(false);
+    expect(isMediaAddress("/Users/me/clip.mp4.txt")).toBe(false);
   });
 });
 

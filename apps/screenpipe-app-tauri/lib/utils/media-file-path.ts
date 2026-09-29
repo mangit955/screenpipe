@@ -4,14 +4,19 @@
 const MEDIA_EXTENSIONS = ["mp4", "mp3", "wav", "webm", "ogg", "m4a"] as const;
 const MEDIA_EXTENSION_PATTERN = MEDIA_EXTENSIONS.join("|");
 
-export function normalizeMediaFilePath(path: string): string {
-  let cleaned = path.trim().replace(/^["'`]|["'`]$/g, "").trim();
-
+/** Percent-decodes a markdown link address, keeping it as-is when malformed. */
+export function decodeLinkAddress(address: string): string {
   try {
-    cleaned = decodeURIComponent(cleaned);
+    return decodeURIComponent(address);
   } catch {
-    // Keep the original string if it contains malformed percent escapes.
+    return address;
   }
+}
+
+// Removes what chat wraps around a path (quotes, backticks, percent escapes, a
+// `file:` scheme), leaving the text the player looks for a path in.
+function unwrapMediaFilePath(path: string): string {
+  let cleaned = decodeLinkAddress(path.trim().replace(/^["'`]|["'`]$/g, "").trim());
 
   if (/^file:\/\/\/[A-Z]:[\\/]/i.test(cleaned)) {
     cleaned = cleaned.replace(/^file:\/\/\//i, "");
@@ -20,9 +25,12 @@ export function normalizeMediaFilePath(path: string): string {
   }
 
   // Windows file URLs often become /C:/Users/... after stripping file://.
-  cleaned = cleaned.replace(/^\/([A-Z]:[\\/])/i, "$1");
+  return cleaned.replace(/^\/([A-Z]:[\\/])/i, "$1");
+}
 
-  const windowsMatch = cleaned.match(
+// The first media path in `text`, so a path can be read out of a sentence.
+function findMediaFilePath(text: string): string {
+  const windowsMatch = text.match(
     new RegExp(`[A-Z]:[\\\\/][^\\n\\r\`"<>]+?\\.(${MEDIA_EXTENSION_PATTERN})`, "i"),
   );
   if (windowsMatch) return windowsMatch[0].trim();
@@ -35,17 +43,21 @@ export function normalizeMediaFilePath(path: string): string {
   // directory when reading the file. Require the `~` to sit at a path boundary
   // (start, or after whitespace) so a directory that merely ends in `~`
   // (e.g. `/Users/me~/clip.mp4`) isn't mistaken for a home reference.
-  const tildeMatch = cleaned.match(
+  const tildeMatch = text.match(
     new RegExp(`(?:^|\\s)(~[\\\\/][^\\n\\r\`"<>]+?\\.(?:${MEDIA_EXTENSION_PATTERN}))`, "i"),
   );
   if (tildeMatch) return tildeMatch[1].trim();
 
-  const unixMatch = cleaned.match(
+  const unixMatch = text.match(
     new RegExp(`/[^\\n\\r\`"<>]+?\\.(${MEDIA_EXTENSION_PATTERN})`, "i"),
   );
   if (unixMatch) return unixMatch[0].trim();
 
-  return cleaned;
+  return text;
+}
+
+export function normalizeMediaFilePath(path: string): string {
+  return findMediaFilePath(unwrapMediaFilePath(path));
 }
 
 export function isAudioMediaPath(path: string): boolean {
@@ -54,42 +66,40 @@ export function isAudioMediaPath(path: string): boolean {
 }
 
 // Where the media reader can find a file: an absolute Unix path (not a `//host`
-// web address), a `~/` path (the backend expands it), a Windows drive or
-// network path, or a `file:` URL.
-const LOCAL_PATH_PREFIX = /^(?:\/(?!\/)|~[\\/]|[A-Z]:[\\/]|\\\\|file:\/)/i;
+// web address), a `~/` path (the backend expands it), or a Windows drive or
+// network path. A `file:` URL is unwrapped into one of these first.
+const LOCAL_PATH_PREFIX = /^(?:\/(?!\/)|~[\\/]|[A-Z]:[\\/]|\\\\)/i;
 const MEDIA_EXTENSION_SUFFIX = new RegExp(`\\.(${MEDIA_EXTENSION_PATTERN})$`, "i");
-// A code block listing several files, or a pattern like `monitor_*.mp4`, is
-// not one file to play.
-const NOT_ONE_FILE = /[\r\n*]/;
-
-/** Percent-decodes a markdown link address, keeping it as-is when malformed. */
-export function decodeLinkAddress(address: string): string {
-  try {
-    return decodeURIComponent(address);
-  } catch {
-    return address;
-  }
-}
-
-/** Whether `path` ends in an audio/video extension, wherever it points. */
-export function hasMediaExtension(path: string): boolean {
-  return MEDIA_EXTENSION_SUFFIX.test(path);
-}
+// A code block listing several files, a pattern like `monitor_*.mp4`, or a
+// placeholder like `monitor_<id>.mp4` is not one file to play.
+const NOT_ONE_FILE = /[\r\n*<>]/;
 
 /**
- * Whether `path` names a local audio/video file the media reader can open.
+ * Whether `path` names one local audio/video file the media reader can open.
  * A bare or relative name (`demo.mp4`) has no location to read from, so it
  * stays text instead of becoming a player that can only fail.
  */
 export function isMediaFilePath(path: string): boolean {
-  // Markdown hands link addresses over percent-encoded (`C:%5CUsers`) and the
-  // player decodes them before reading, so judge the decoded form.
-  const decoded = decodeLinkAddress(path);
+  // Judge the path the way the player reads it: markdown hands link addresses
+  // over percent-encoded (`C:%5CUsers`) or as `file:` URLs.
+  const unwrapped = unwrapMediaFilePath(path);
   return (
-    LOCAL_PATH_PREFIX.test(decoded) &&
-    hasMediaExtension(decoded) &&
-    !NOT_ONE_FILE.test(decoded)
+    LOCAL_PATH_PREFIX.test(unwrapped) &&
+    MEDIA_EXTENSION_SUFFIX.test(unwrapped) &&
+    !NOT_ONE_FILE.test(unwrapped) &&
+    // The player reads only the first media path it finds, so text naming
+    // several (`/a.mp4, /b.mp4`) would play just part of what it says.
+    findMediaFilePath(unwrapped) === unwrapped
   );
+}
+
+/**
+ * Whether a link or image address points at an audio/video file, local or on
+ * the web. A web address may carry a `?query` or `#fragment` after the name.
+ */
+export function isMediaAddress(address: string): boolean {
+  const withoutQuery = address.split(/[?#]/, 1)[0] ?? address;
+  return MEDIA_EXTENSION_SUFFIX.test(withoutQuery);
 }
 
 export function normalizeLocalMediaMarkdown(text: string): string {

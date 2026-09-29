@@ -3,7 +3,7 @@
 
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import remarkGfm from "remark-gfm";
 
 // The native media reader is the only boundary faked here: everything between
@@ -43,6 +43,16 @@ describe("MemoizedReactMarkdown local media", () => {
       ["~/.screenpipe/data/monitor_*.mp4"],
     ],
     [
+      "a placeholder path",
+      "saved as `~/.screenpipe/data/monitor_<id>.mp4`",
+      ["~/.screenpipe/data/monitor_<id>.mp4"],
+    ],
+    [
+      "two paths on one line",
+      "compare `/Users/me/Movies/a.mp4, /Users/me/Movies/b.mp4`",
+      ["/Users/me/Movies/a.mp4, /Users/me/Movies/b.mp4"],
+    ],
+    [
       "bare filenames in a table",
       [
         "| File | Size |",
@@ -80,6 +90,11 @@ describe("MemoizedReactMarkdown local media", () => {
     ["a bare filename", "![after](after-github.mp4)", "after-github.mp4"],
     ["a name with spaces", "![](<after github.mp4>)", "after github.mp4"],
     ["a web address", "![clip](https://example.com/clip.webm)", "https://example.com/clip.webm"],
+    [
+      "a web address with a query",
+      "![clip](https://example.com/clip.mp4?t=1)",
+      "https://example.com/clip.mp4?t=1",
+    ],
   ])("shows an image-syntax video with %s as text", (_label, markdown, name) => {
     const { container } = render(
       <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{markdown}</MemoizedReactMarkdown>,
@@ -87,6 +102,21 @@ describe("MemoizedReactMarkdown local media", () => {
 
     expect(screen.getByText(name).tagName).toBe("CODE");
     expect(container.querySelector("img")).toBeNull();
+    expect(getMediaFileCommand).not.toHaveBeenCalled();
+  });
+
+  // Nothing in the app resolves a relative address, so such a link would do
+  // nothing when clicked.
+  it.each([
+    ["a bare filename", "Watch [after](after-github.mp4) now"],
+    ["a relative path with a fragment", "Watch [after](clips/after-github.mp4#t=3) now"],
+  ])("keeps a link to %s as plain text", (_label, markdown) => {
+    const { container } = render(
+      <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{markdown}</MemoizedReactMarkdown>,
+    );
+
+    expect(container.textContent).toBe("Watch after now");
+    expect(screen.queryByRole("link")).toBeNull();
     expect(getMediaFileCommand).not.toHaveBeenCalled();
   });
 
@@ -141,5 +171,84 @@ describe("MemoizedReactMarkdown local media", () => {
 
     await waitFor(() => expect(container.querySelector("video")).not.toBeNull());
     expect(getMediaFileCommand).toHaveBeenCalledWith(path);
+  });
+
+  describe("when the file can't be read", () => {
+    // Long enough for the player to use up all of its retries.
+    const RETRIES_DONE_MS = 4_000;
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+      getMediaFileCommand.mockResolvedValue({ status: "error", error: "File does not exist" });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const renderMarkdown = (markdown: string) =>
+      render(
+        <MemoizedReactMarkdown urlTransform={chatUrlTransform}>{markdown}</MemoizedReactMarkdown>,
+      );
+
+    it.each([
+      [
+        "inline code",
+        "saved to `/Users/me/Movies/missing-code.mp4`",
+        "/Users/me/Movies/missing-code.mp4",
+        "CODE",
+      ],
+      [
+        "a link",
+        "[the recording](</Users/me/Movies/missing-link.mp4>)",
+        "the recording",
+        "P",
+      ],
+      [
+        "an image",
+        "![clip](</Users/me/Movies/missing-image.mp4>)",
+        "/Users/me/Movies/missing-image.mp4",
+        "CODE",
+      ],
+    ])("shows %s as the text it was written as", async (_label, markdown, text, tagName) => {
+      renderMarkdown(markdown);
+      await act(() => vi.advanceTimersByTimeAsync(RETRIES_DONE_MS));
+
+      expect(screen.getByText(text).tagName).toBe(tagName);
+      expect(screen.queryByRole("link")).toBeNull();
+      expect(screen.queryByText(/Failed to load media/)).toBeNull();
+    });
+
+    it("shows a file already found missing at once, checking it only once more", async () => {
+      const path = "/Users/me/Movies/missing-again.mp4";
+      const first = renderMarkdown(`\`${path}\``);
+      await act(() => vi.advanceTimersByTimeAsync(RETRIES_DONE_MS));
+      first.unmount();
+      getMediaFileCommand.mockClear();
+
+      // Switching back to the chat mounts the player again.
+      renderMarkdown(`\`${path}\``);
+      expect(screen.getByText(path).tagName).toBe("CODE");
+      expect(screen.queryByText("Loading media...")).toBeNull();
+
+      await act(() => vi.advanceTimersByTimeAsync(RETRIES_DONE_MS));
+      expect(getMediaFileCommand).toHaveBeenCalledTimes(1);
+    });
+
+    it("plays a file that appears after it was found missing", async () => {
+      const path = "/Users/me/Movies/appears-later.mp4";
+      const first = renderMarkdown(`\`${path}\``);
+      await act(() => vi.advanceTimersByTimeAsync(RETRIES_DONE_MS));
+      first.unmount();
+
+      getMediaFileCommand.mockResolvedValue({
+        status: "ok",
+        data: { data: "AAAA", mimeType: "video/mp4" },
+      });
+      const { container } = renderMarkdown(`\`${path}\``);
+      await act(() => vi.advanceTimersByTimeAsync(10));
+
+      expect(container.querySelector("video")).not.toBeNull();
+    });
   });
 });
