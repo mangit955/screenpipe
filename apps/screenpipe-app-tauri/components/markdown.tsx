@@ -12,6 +12,7 @@ import {
   isMediaFilePath,
   normalizeLocalMediaMarkdown,
   normalizeMediaFilePath,
+  runsPastLinkEnd,
 } from "@/lib/utils/media-file-path";
 
 function unwrapMarkdownUrl(url: string): string {
@@ -121,8 +122,10 @@ function wrapPathForMarkdown(path: string): string {
 
 function rewriteLocalMediaLinksForChat(text: string): string {
   return text.replace(
-    /(!?)\[([^\]]*)\]\(((?:file:\/\/\/?[^\n\r]+?|\/[^\n\r]+?|[A-Z]:[\\/][^\n\r]+?)\.(mp4|mp3|wav|webm|ogg|m4a))\)/gi,
+    // The path stops before another link's `](` so two links on a line stay two.
+    /(!?)\[([^\]]*)\]\(((?:file:\/\/\/?|\/|[A-Z]:[\\/])(?:(?!\]\()[^\n\r])+?\.(mp4|mp3|wav|webm|ogg|m4a))\)/gi,
     (match, sigil: string, label: string, rawPath: string) => {
+      if (runsPastLinkEnd(rawPath)) return match;
       // Rewrite only a path the player reads whole. Shortening anything else
       // (`/Music/old.mp3-files/clip.mp4`) would name a different file.
       const localPath = resolveLocalPathFromMarkdownUrl(rawPath);

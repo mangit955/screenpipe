@@ -156,6 +156,32 @@ describe("rewriteLocalMarkdownLinksForChat", () => {
     expect(rewriteLocalMarkdownLinksForChat(image)).toBe(image);
   });
 
+  const call = "/Users/me/System Audio (output)_2026-05-25_11-27-00.mp4";
+  it.each([
+    [
+      "two links",
+      `Saved [notes](/Users/me/notes.md) and [call](${call}).`,
+      `Saved [notes](screenpipe://view?path=%2FUsers%2Fme%2Fnotes.md) and [call](<${call}>).`,
+    ],
+    [
+      "a table row",
+      `| [folder](/Users/me/Movies) | [play](${call}) |`,
+      `| [folder](screenpipe://view?path=%2FUsers%2Fme%2FMovies) | [play](<${call}>) |`,
+    ],
+    [
+      "two images",
+      `![shot](/Users/me/shot.png) ![call](${call})`,
+      `![shot](/Users/me/shot.png) ![call](<${call}>)`,
+    ],
+    [
+      "a link followed by a note in parentheses",
+      "See [notes](/Users/me/notes.md) (audio: /Users/me/clip.mp4).",
+      "See [notes](screenpipe://view?path=%2FUsers%2Fme%2Fnotes.md) (audio: /Users/me/clip.mp4).",
+    ],
+  ])("keeps each link whole in %s", (_case, input, expected) => {
+    expect(rewriteLocalMarkdownLinksForChat(input)).toBe(expected);
+  });
+
   it("opens a document whose name contains a media extension in the viewer, not a player", () => {
     expect(rewriteLocalMarkdownLinksForChat("[notes](/Users/me/clip.mp4.txt)")).toBe(
       "[notes](screenpipe://view?path=%2FUsers%2Fme%2Fclip.mp4.txt)",

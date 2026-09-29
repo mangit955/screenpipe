@@ -262,6 +262,23 @@ describe("MarkdownBlock", () => {
     expect(getMediaFileMock).not.toHaveBeenCalled();
   });
 
+  it("keeps a document link and a recording link apart on one line", () => {
+    const onOpenViewerPath = vi.fn();
+    const call = "/Users/me/System Audio (output)_2026-05-25_11-27-00.mp4";
+    const { unmount } = render(
+      <MarkdownBlock
+        text={`Saved [notes](/Users/me/notes.md) and [recording](${call}).`}
+        isUser={false}
+        onOpenViewerPath={onOpenViewerPath}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "notes" }));
+    expect(onOpenViewerPath).toHaveBeenCalledWith("/Users/me/notes.md");
+    expect(getMediaFileMock.mock.calls).toEqual([[call]]);
+    unmount();
+  });
+
   it("shows a missing recording as code, and at once after switching back to the chat", async () => {
     vi.useFakeTimers();
     const path = "/Users/me/.screenpipe/data/monitor_1_2026-09-28_10-30-00.mp4";

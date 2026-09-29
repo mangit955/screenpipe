@@ -280,4 +280,22 @@ describe("normalizeLocalMediaMarkdown — edge cases", () => {
       normalizeLocalMediaMarkdown(String.raw`[v](C:\Users\me\clip.mp4)`),
     ).toBe(String.raw`[v](<C:\Users\me\clip.mp4>)`);
   });
+
+  it("wraps a Windows device recording whose name nests parentheses", () => {
+    const path = String.raw`C:\Users\me\.screenpipe\data\Speakers (Realtek(R) Audio) (output)_2026-05-25_11-27-00.mp4`;
+    expect(normalizeLocalMediaMarkdown(`[call](${path})`)).toBe(`[call](<${path}>)`);
+  });
+
+  it("wraps only the media link when another link comes first on the line", () => {
+    expect(
+      normalizeLocalMediaMarkdown(
+        "Saved [notes](/Users/me/notes.md) and [call](/Users/me/System Audio (output).mp4).",
+      ),
+    ).toBe("Saved [notes](/Users/me/notes.md) and [call](</Users/me/System Audio (output).mp4>).");
+  });
+
+  it("leaves a link alone when a media path only appears in a note after it", () => {
+    const md = "See [notes](/Users/me/notes.md) (audio: /Users/me/clip.mp4).";
+    expect(normalizeLocalMediaMarkdown(md)).toBe(md);
+  });
 });

@@ -102,10 +102,27 @@ export function isMediaAddress(address: string): boolean {
   return MEDIA_EXTENSION_SUFFIX.test(withoutQuery);
 }
 
+/**
+ * Whether a link address holds a `)` that closes no `(` before it. Markdown
+ * ends a link there, so the address has run on into the text after the link
+ * (`/a.md) (audio: /b.mp4`), unlike a name with its own parentheses
+ * (`Speakers (Realtek(R) Audio) (output).mp4`).
+ */
+export function runsPastLinkEnd(address: string): boolean {
+  let open = 0;
+  for (const char of address) {
+    if (char === "(") open++;
+    else if (char === ")" && --open < 0) return true;
+  }
+  return false;
+}
+
 export function normalizeLocalMediaMarkdown(text: string): string {
   return text.replace(
-    new RegExp(`(!?)\\[([^\\]]*)\\]\\(((?:/[^\n\r]+?|[A-Z]:[\\\\/][^\n\r]+?)\\.(${MEDIA_EXTENSION_PATTERN}))\\)`, "gi"),
-    (_match, sigil: string, alt: string, path: string) => {
+    // The path stops before another link's `](` so two links on a line stay two.
+    new RegExp(`(!?)\\[([^\\]]*)\\]\\(((?:/|[A-Z]:[\\\\/])(?:(?!\\]\\()[^\n\r])+?\\.(${MEDIA_EXTENSION_PATTERN}))\\)`, "gi"),
+    (match, sigil: string, alt: string, path: string) => {
+      if (runsPastLinkEnd(path)) return match;
       const trimmedPath = path.trim();
       if (trimmedPath.startsWith("<") && trimmedPath.endsWith(">")) {
         return `${sigil}[${alt}](${trimmedPath})`;
