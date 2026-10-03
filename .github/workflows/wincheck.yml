@@ -1,0 +1,28 @@
+# Scratch workflow for screenpipe PR #7464: run the PR's icons.rs on Windows.
+name: wincheck-7464
+on:
+  push:
+    branches: [scratch/wincheck-7464]
+  workflow_dispatch:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: wincheck
+    steps:
+      - uses: actions/checkout@v4
+      - name: Environment
+        shell: powershell
+        run: |
+          "Windows PowerShell $($PSVersionTable.PSVersion)"
+          "language mode: $($ExecutionContext.SessionState.LanguageMode)"
+          "user: $env:USERNAME; Store packages: $((Get-AppxPackage).Count)"
+          (Get-FileHash icons.rs -Algorithm SHA256).Hash
+      - run: rustup toolchain install 1.94.0 --profile minimal
+      - name: cargo test (PR icons.rs, verbatim)
+        run: cargo +1.94.0 test -- --nocapture --test-threads=1
