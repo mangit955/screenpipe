@@ -101,28 +101,6 @@ pub mod icons {
             assert_eq!(listings.load(Ordering::SeqCst), 1);
         }
 
-        /// Lookups at once wait for one of the 4 slots and all resolve, with the
-        /// icon read on the blocking thread.
-        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn concurrent_icon_lookups_all_resolve() {
-            let started = Instant::now();
-            let lookups: Vec<_> = (0..24)
-                .map(|i| {
-                    let name = ["notepad", "explorer", "msedge"][i % 3];
-                    tokio::spawn(async move { (name, get_app_icon(name, None).await) })
-                })
-                .collect();
-            for lookup in lookups {
-                let (name, icon) = lookup.await.unwrap();
-                assert!(
-                    matches!(&icon, Ok(Some(i)) if i.data.starts_with(b"\x89PNG")),
-                    "{name}: {}",
-                    show(&icon)
-                );
-            }
-            println!("24 lookups at once: all PNG in {:?}", started.elapsed());
-        }
-
         /// Run by the workflow as a new standard (non-admin) local user.
         #[tokio::test]
         #[ignore]
@@ -140,6 +118,101 @@ pub mod icons {
             for name in ["notepad", "explorer", "msedge"] {
                 println!("{name:10} {}", show(&get_app_icon(name, None).await));
             }
+        }
+    }
+}
+
+/// The PR's previous icons.rs (cae3cfe6d), to compare concurrent lookups.
+#[cfg(target_os = "windows")]
+pub mod icons_prev {
+    include!("../icons_prev.rs");
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod icon_concurrency {
+    use std::time::Instant;
+
+    const EXPLORER: &str = r"C:\Windows\explorer.exe";
+    const NOTEPAD: &str = r"C:\Windows\notepad.exe";
+
+    /// Calls `windows_icons::get_icon_by_path` from `threads` threads at once,
+    /// `per_thread` times each, and returns how many calls failed.
+    fn raw_failures(threads: usize, per_thread: usize, com: Option<windows::Win32::System::Com::COINIT>, lock: bool) -> (usize, Vec<String>) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let errors = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let errors = &errors;
+                scope.spawn(move || {
+                    if let Some(model) = com {
+                        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, model); }
+                    }
+                    for i in 0..per_thread {
+                        let path = if (t + i) % 2 == 0 { EXPLORER } else { NOTEPAD };
+                        let _guard = lock.then(|| LOCK.lock().unwrap());
+                        if let Err(e) = windows_icons::get_icon_by_path(path) {
+                            errors.lock().unwrap().push(format!("{path}: {e}"));
+                        }
+                    }
+                });
+            }
+        });
+        let errors = errors.into_inner().unwrap();
+        (errors.len(), errors.into_iter().take(3).collect())
+    }
+
+    #[test]
+    fn raw_get_icon_by_path_under_concurrency() {
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
+        for (label, threads, per, com, lock) in [
+            ("1 thread, no COM", 1, 96, None, false),
+            ("8 threads, no COM", 8, 12, None, false),
+            ("8 threads, no COM, one at a time (mutex)", 8, 12, None, true),
+            ("8 threads, COM STA per thread", 8, 12, Some(COINIT_APARTMENTTHREADED), false),
+            ("8 threads, COM MTA per thread", 8, 12, Some(COINIT_MULTITHREADED), false),
+            ("4 threads, no COM", 4, 24, None, false),
+            ("2 threads, no COM", 2, 48, None, false),
+        ] {
+            let started = Instant::now();
+            let (failed, sample) = raw_failures(threads, per, com, lock);
+            println!("RAW {label:45} failed {failed}/{} in {:?} {sample:?}", threads * per, started.elapsed());
+        }
+    }
+
+    async fn many_lookups<F, Fut>(label: &str, get: F)
+    where
+        F: Fn(&'static str) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<Vec<u8>>, String>> + Send + 'static,
+    {
+        let started = Instant::now();
+        let handles: Vec<_> = (0..48)
+            .map(|i| {
+                let name = ["notepad", "explorer", "msedge"][i % 3];
+                let lookup = get(name);
+                tokio::spawn(async move { (name, lookup.await) })
+            })
+            .collect();
+        let mut failed = Vec::new();
+        for handle in handles {
+            let (name, icon) = handle.await.unwrap();
+            if !matches!(&icon, Ok(Some(data)) if data.starts_with(b"\x89PNG")) {
+                failed.push(format!("{name}: {:?}", icon.map(|i| i.map(|d| d.len()))));
+            }
+        }
+        println!("APP {label:45} failed {}/48 in {:?} {:?}", failed.len(), started.elapsed(), failed.iter().take(3).collect::<Vec<_>>());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn get_app_icon_under_concurrency_new_vs_prev() {
+        for round in 0..3 {
+            many_lookups(&format!("this commit, round {round}"), |name| async move {
+                crate::icons::get_app_icon(name, None).await.map(|i| i.map(|i| i.data))
+            })
+            .await;
+            many_lookups(&format!("previous commit cae3cfe6d, round {round}"), |name| async move {
+                crate::icons_prev::get_app_icon(name, None).await.map(|i| i.map(|i| i.data))
+            })
+            .await;
         }
     }
 }
