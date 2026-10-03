@@ -24,7 +24,21 @@ jobs:
           "user: $env:USERNAME; Store packages: $((Get-AppxPackage).Count)"
           (Get-FileHash icons.rs -Algorithm SHA256).Hash
       - run: rustup toolchain install 1.94.0 --profile minimal
-      - name: Failed Store listing is retried (own process, empty cache)
-        run: cargo +1.94.0 test failed_listing -- --nocapture
       - name: cargo test (PR icons.rs, verbatim)
-        run: cargo +1.94.0 test -- --nocapture --test-threads=1 --skip failed_listing
+        run: cargo +1.94.0 test -- --nocapture --test-threads=1
+      - name: Store lookup as a standard (non-admin) user
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $exe = (Get-ChildItem target\debug\deps\wincheck-*.exe | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+          $pw = ConvertTo-SecureString 'Sp-Test-7464!x' -AsPlainText -Force
+          New-LocalUser -Name sptest -Password $pw -AccountNeverExpires | Out-Null
+          $dir = 'C:\sptest'
+          New-Item -ItemType Directory $dir -Force | Out-Null
+          Copy-Item $exe "$dir\wincheck.exe"
+          icacls $dir /grant 'sptest:(OI)(CI)F' | Out-Null
+          $cred = New-Object System.Management.Automation.PSCredential('sptest', $pw)
+          $p = Start-Process -FilePath "$dir\wincheck.exe" -ArgumentList '--ignored','--exact','icons::diag::standard_user_lookup','--nocapture' -Credential $cred -LoadUserProfile -WorkingDirectory $dir -RedirectStandardOutput "$dir\out.txt" -RedirectStandardError "$dir\err.txt" -Wait -PassThru
+          "exit code: $($p.ExitCode)"
+          Get-Content "$dir\out.txt"
+          Get-Content "$dir\err.txt"

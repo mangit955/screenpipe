@@ -10,6 +10,7 @@ pub mod icons {
     mod diag {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
         use std::time::{Duration, Instant};
 
         fn show(icon: &Result<Option<AppIcon>, String>) -> String {
@@ -23,21 +24,19 @@ pub mod icons {
         #[tokio::test]
         async fn print_lookups() {
             let started = Instant::now();
-            let packages = list_appx_packages().await;
-            println!("listed {} Store packages in {:?}", packages.len(), started.elapsed());
+            let packages = list_appx_packages().unwrap();
+            println!("listed {} Store apps in {:?}", packages.len(), started.elapsed());
             assert!(!packages.is_empty());
-            assert!(packages.iter().all(|(name, folder)| !name.starts_with('\u{feff}') && folder.is_dir()), "{packages:?}");
-            for (name, folder) in packages.iter().take(12) {
-                println!("  {name}\t{}", folder.display());
-            }
+            assert!(packages.iter().all(|(name, folder)| !name.is_empty() && folder.is_dir()), "{packages:?}");
             for name in [
                 "ShellExperienceHost", "StartMenuExperienceHost", "SearchHost", "Calculator",
                 "WindowsTerminal", "Notepad", "notepad.exe", "msedge", "msedge.exe", "explorer",
-                "powershell", "Code", "Google Chrome", "chrome", "Firefox", "cmd", "x$(calc)", ".exe", "a",
+                "powershell", "Code", "Google Chrome", "chrome", "Firefox", "cmd", "x$(calc)",
+                "Halo: Reach", ".exe", "a",
             ] {
                 let started = Instant::now();
                 let reg = get_exe_by_reg_key(name);
-                let appx = get_exe_by_appx(name).await;
+                let appx = get_exe_by_appx(name);
                 let disk = get_exe_from_potential_path(name);
                 let icon = get_app_icon(name, None).await;
                 println!(
@@ -47,89 +46,77 @@ pub mod icons {
             }
         }
 
-        /// Real PowerShell behind the shared cache: 100 callers, a third of them
-        /// giving up after 50 ms, start exactly one listing.
-        #[tokio::test]
-        async fn burst_with_aborts_lists_once() {
-            static LISTINGS: AtomicUsize = AtomicUsize::new(0);
-            let slot = std::sync::Mutex::new(None);
-            let ttl = Duration::from_secs(300);
+        /// The package API returns the same apps, in the same order, as the
+        /// Get-AppxPackage script the earlier revision of this PR ran (main
+        /// packages only; frameworks hold no apps).
+        #[test]
+        fn matches_get_appx_package() {
+            let script = "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+                Get-AppxPackage | ForEach-Object { $_.Name + \"`t\" + $_.InstallLocation + \"`t\" + $_.IsFramework }";
+            let out = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .output()
+                .unwrap();
+            let all: Vec<(String, std::path::PathBuf, bool)> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.trim().split('\t');
+                    let (name, folder, framework) = (parts.next()?, parts.next()?, parts.next()?);
+                    Some((name.to_string(), folder.into(), framework == "True"))
+                })
+                .collect();
+            let script_main: AppxPackages = all.iter().filter(|p| !p.2).map(|p| (p.0.clone(), p.1.clone())).collect();
+            let api = list_appx_packages().unwrap();
+            println!(
+                "Get-AppxPackage: {} packages, {} main; PackageManager: {} main",
+                all.len(), script_main.len(), api.len()
+            );
+            for (name, _) in script_main.iter().filter(|p| !api.contains(p)) {
+                println!("  only in Get-AppxPackage: {name}");
+            }
+            for (name, _) in api.iter().filter(|p| !script_main.contains(p)) {
+                println!("  only in PackageManager: {name}");
+            }
+            assert_eq!(api, script_main);
+        }
+
+        /// 100 lookups at once on a cold cache list once, with the real API.
+        #[test]
+        fn concurrent_lookups_list_once() {
+            let slot = Mutex::new(None);
+            let listings = AtomicUsize::new(0);
             let started = Instant::now();
-            let callers = (0..100).map(|i| {
-                let call = cached_appx_packages(&slot, ttl, ttl, || async {
-                    LISTINGS.fetch_add(1, Ordering::SeqCst);
-                    list_appx_packages().await
-                });
-                async move {
-                    if i % 3 == 0 {
-                        tokio::time::timeout(Duration::from_millis(50), call).await.ok().map(|p| p.len())
-                    } else {
-                        Some(call.await.len())
-                    }
+            std::thread::scope(|scope| {
+                for _ in 0..100 {
+                    scope.spawn(|| {
+                        let packages = cached_appx_packages(&slot, Duration::from_secs(300), || {
+                            listings.fetch_add(1, Ordering::SeqCst);
+                            list_appx_packages()
+                        });
+                        assert!(!packages.is_empty());
+                    });
                 }
             });
-            let results = futures::future::join_all(callers).await;
-            let finished: Vec<_> = results.iter().flatten().collect();
+            println!("100 threads: {} listing(s) in {:?}", listings.load(Ordering::SeqCst), started.elapsed());
+            assert_eq!(listings.load(Ordering::SeqCst), 1);
+        }
+
+        /// Run by the workflow as a new standard (non-admin) local user.
+        #[tokio::test]
+        #[ignore]
+        async fn standard_user_lookup() {
+            let groups = std::process::Command::new("whoami").arg("/groups").output().unwrap();
+            let groups = String::from_utf8_lossy(&groups.stdout);
             println!(
-                "100 callers ({} gave up): {} PowerShell listing(s), {} packages, {:?}",
-                results.iter().filter(|r| r.is_none()).count(),
-                LISTINGS.load(Ordering::SeqCst),
-                finished.first().copied().copied().unwrap_or(0),
-                started.elapsed()
+                "user={} administrators_group={:?}",
+                std::env::var("USERNAME").unwrap_or_default(),
+                groups.lines().find(|l| l.contains("S-1-5-32-544")).map(str::trim)
             );
-            assert_eq!(LISTINGS.load(Ordering::SeqCst), 1);
-            assert!(finished.iter().all(|n| **n > 0 && *n == finished[0]));
-        }
-
-        /// The production listing failing for real (powershell.exe not found): the
-        /// failure is reused for APPX_RETRY_AFTER, then a working listing replaces it.
-        /// Run alone (`cargo test failed_listing`) so nothing has filled the cache.
-        #[tokio::test]
-        async fn failed_listing_is_retried() {
-            let root = std::env::var_os("SystemRoot").unwrap();
-            std::env::set_var("SystemRoot", r"C:\no-such-windows");
-            let started = Instant::now();
-            assert_eq!(get_exe_by_appx("ShellExperienceHost").await, None);
-            std::env::set_var("SystemRoot", &root);
-            println!("failed listing after {:?}", started.elapsed());
-            // PowerShell works again, but the failure is still reused.
-            assert_eq!(get_exe_by_appx("ShellExperienceHost").await, None);
-            tokio::time::sleep(APPX_RETRY_AFTER.saturating_sub(started.elapsed()) + Duration::from_secs(1)).await;
-            let found = get_exe_by_appx("ShellExperienceHost").await;
-            println!("after {:?}: {found:?}", started.elapsed());
-            assert!(found.is_some());
-            let icon = get_app_icon("ShellExperienceHost", None).await;
-            println!("icon: {}", show(&icon));
-            assert!(matches!(icon, Ok(Some(ref i)) if i.data.starts_with(b"\x89PNG")));
-        }
-
-        /// What bytes PowerShell 5.1 writes for a non-ASCII path when launched the
-        /// way list_appx_packages launches it.
-        #[tokio::test]
-        async fn powershell_output_encoding() {
-            let text = "'C:\\Users\\J' + [char]0xFC + 'rgen\\' + [char]0x65E5 + '\\app'";
-            let scripts = [
-                ("default", text.to_string()),
-                ("OutputEncoding utf8", format!("[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); {text}")),
-                ("OutputEncoding UTF8 prop", format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; {text}")),
-                ("raw bytes", format!("$b = [Text.Encoding]::UTF8.GetBytes({text}); [Console]::OpenStandardOutput().Write($b, 0, $b.Length)")),
-            ];
-            for (label, script) in scripts {
-                let mut command = tokio::process::Command::new(powershell_exe());
-                command
-                    .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "hidden"])
-                    .args(["-Command", &script])
-                    .creation_flags(0x08000000);
-                let out = command.output().await.unwrap();
-                println!(
-                    "{label:26} status={:?} utf8={:?}\n{:26} hex={:02x?}\n{:26} stderr={:?}",
-                    out.status.code(),
-                    std::str::from_utf8(&out.stdout).ok(),
-                    "",
-                    out.stdout,
-                    "",
-                    String::from_utf8_lossy(&out.stderr)
-                );
+            let listing = list_appx_packages();
+            println!("Store listing: {:?}", listing.as_ref().map(|p| p.len()));
+            assert!(listing.is_ok());
+            for name in ["notepad", "explorer", "msedge"] {
+                println!("{name:10} {}", show(&get_app_icon(name, None).await));
             }
         }
     }

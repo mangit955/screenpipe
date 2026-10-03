@@ -8,13 +8,13 @@ publish = false
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.36.0", features = ["full"] }
-futures = "0.3.30"
-lazy_static = "1.5.0"
+tracing = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52.0"
 image = "0.25.5"
 windows-icons = { git = "https://github.com/tribhuwan-kumar/windows-icons.git", rev = "4dcd086b36bed286181cb87636ad6eb058ab7684" }
+windows = { version = "0.58", features = ["ApplicationModel", "Foundation_Collections", "Management_Deployment"] }
 
 [dev-dependencies]
 tempfile = "3"
