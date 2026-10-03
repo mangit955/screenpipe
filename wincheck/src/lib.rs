@@ -216,3 +216,85 @@ mod icon_concurrency {
         }
     }
 }
+
+#[cfg(target_os = "windows")]
+pub mod icons_mutex {
+    include!("../icons_mutex.rs");
+}
+#[cfg(target_os = "windows")]
+pub mod icons_com {
+    include!("../icons_com.rs");
+}
+
+/// Each case is run by the workflow in a fresh process, so the first icon reads
+/// in the process happen at the same moment, as when the app starts.
+#[cfg(all(test, target_os = "windows"))]
+mod cold {
+    const PATHS: [&str; 3] = [
+        r"C:\Windows\explorer.exe",
+        r"C:\Windows\notepad.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    ];
+
+    fn raw(com: Option<windows::Win32::System::Com::COINIT>, lock: bool) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let failed = std::sync::atomic::AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for t in 0..8 {
+                let (failed, barrier) = (&failed, &barrier);
+                scope.spawn(move || {
+                    if let Some(model) = com {
+                        unsafe { let _ = windows::Win32::System::Com::CoInitializeEx(None, model); }
+                    }
+                    barrier.wait();
+                    for i in 0..6 {
+                        let _guard = lock.then(|| LOCK.lock().unwrap());
+                        if let Err(e) = windows_icons::get_icon_by_path(PATHS[(t + i) % 3]) {
+                            println!("  {}: {e}", PATHS[(t + i) % 3]);
+                            failed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+        println!("COLD {}/48", failed.into_inner());
+    }
+
+    async fn app<F, Fut>(get: F)
+    where
+        F: Fn(&'static str) -> Fut,
+        Fut: std::future::Future<Output = Result<Option<Vec<u8>>, String>> + Send + 'static,
+    {
+        let handles: Vec<_> = (0..48)
+            .map(|i| {
+                let name = ["explorer", "notepad", "msedge"][i % 3];
+                let lookup = get(name);
+                tokio::spawn(async move { (name, lookup.await) })
+            })
+            .collect();
+        let mut failed = 0;
+        for handle in handles {
+            let (name, icon) = handle.await.unwrap();
+            if !matches!(&icon, Ok(Some(data)) if data.starts_with(b"\x89PNG")) {
+                println!("  {name}: {:?}", icon.map(|i| i.map(|d| d.len())));
+                failed += 1;
+            }
+        }
+        println!("COLD {failed}/48");
+    }
+
+    #[test] #[ignore] fn raw_no_com() { raw(None, false) }
+    #[test] #[ignore] fn raw_sta() { raw(Some(windows::Win32::System::Com::COINIT_APARTMENTTHREADED), false) }
+    #[test] #[ignore] fn raw_mta() { raw(Some(windows::Win32::System::Com::COINIT_MULTITHREADED), false) }
+    #[test] #[ignore] fn raw_mutex() { raw(None, true) }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)] #[ignore]
+    async fn app_new() { app(|n| async move { crate::icons::get_app_icon(n, None).await.map(|i| i.map(|i| i.data)) }).await }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)] #[ignore]
+    async fn app_prev() { app(|n| async move { crate::icons_prev::get_app_icon(n, None).await.map(|i| i.map(|i| i.data)) }).await }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)] #[ignore]
+    async fn app_mutex() { app(|n| async move { crate::icons_mutex::get_app_icon(n, None).await.map(|i| i.map(|i| i.data)) }).await }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)] #[ignore]
+    async fn app_com() { app(|n| async move { crate::icons_com::get_app_icon(n, None).await.map(|i| i.map(|i| i.data)) }).await }
+}
