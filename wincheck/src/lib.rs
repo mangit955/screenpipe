@@ -25,6 +25,8 @@ pub mod icons {
             let started = Instant::now();
             let packages = list_appx_packages().await;
             println!("listed {} Store packages in {:?}", packages.len(), started.elapsed());
+            assert!(!packages.is_empty());
+            assert!(packages.iter().all(|(name, folder)| !name.starts_with('\u{feff}') && folder.is_dir()), "{packages:?}");
             for (name, folder) in packages.iter().take(12) {
                 println!("  {name}\t{}", folder.display());
             }

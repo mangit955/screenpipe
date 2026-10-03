@@ -529,8 +529,9 @@ where
 #[cfg(target_os = "windows")]
 async fn list_appx_packages() -> AppxPackages {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    const SCRIPT: &str =
-        r#"Get-AppxPackage | ForEach-Object { $_.Name + "`t" + $_.InstallLocation }"#;
+    // Windows PowerShell writes to a pipe in the console code page, which turns
+    // non-ASCII characters in a folder into other bytes or `?`.
+    const SCRIPT: &str = r#"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Get-AppxPackage | ForEach-Object { $_.Name + "`t" + $_.InstallLocation }"#;
 
     let mut command = tokio::process::Command::new(powershell_exe());
     command
