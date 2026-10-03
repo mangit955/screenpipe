@@ -1222,34 +1222,36 @@ mod windows_icon_tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("ran");
         // The marker path may contain spaces, which the pre-fix Store lookup
-        // removed, so this payload reads it from an inherited environment variable.
+        // removed, so the first payload reads it from an inherited environment
+        // variable instead.
         std::env::set_var("SCREENPIPE_ICON_TEST_MARKER", &marker);
-        let no_spaces = "x$(ni($env:SCREENPIPE_ICON_TEST_MARKER))";
         let create = format!("New-Item -ItemType File -Path '{}'", marker.display());
-        let with_spaces = format!("x$({create})");
-
-        // Controls: both pre-fix lookups pasted the name into PowerShell source.
-        // The Store lookup removed spaces first; the Start Menu lookup didn't.
-        assert!(ran_in_pre_fix_script(
-            &format!(r#"Get-AppxPackage | Where-Object {{ $_.Name -like "*{no_spaces}*" }}"#),
-            &marker
-        ));
-        assert!(ran_in_pre_fix_script(
-            &format!(
-                r#"Get-ChildItem -Path "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Filter "*{with_spaces}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}"#
-            ),
-            &marker
-        ));
-
-        // U+201C is a curly quote PowerShell treats like `"`.
+        // U+201C is a curly quote PowerShell treats like `"`. `#` comments out the
+        // rest of the pre-fix command so the injected one parses.
         let payloads = [
-            no_spaces.to_string(),
-            with_spaces,
-            format!("x\"; {create}; \""),
-            format!("x\u{201C}; {create}; \u{201C}"),
-            format!("x'; {create}; '"),
-            format!("x; {create}"),
+            "x$(ni($env:SCREENPIPE_ICON_TEST_MARKER))".to_string(),
+            format!("x$({create})"),
+            format!("x\"; {create}; #"),
+            format!("x\u{201C}; {create}; #"),
         ];
+
+        // Controls: every payload ran as code in a pre-fix lookup. Both pasted the
+        // name into PowerShell source; the Store one removed spaces first.
+        for name in &payloads {
+            let store = format!(
+                r#"Get-AppxPackage | Where-Object {{ $_.Name -like "*{}*" }}"#,
+                name.replace(' ', "")
+            );
+            let start_menu = format!(
+                r#"Get-ChildItem -Path "C:\ProgramData\Microsoft\Windows\Start Menu\Programs" -Filter "*{name}*.exe" -Recurse | ForEach-Object {{ $_.FullName }}"#
+            );
+            assert!(
+                ran_in_pre_fix_script(&store, &marker)
+                    || ran_in_pre_fix_script(&start_menu, &marker),
+                "control payload never ran: {name}"
+            );
+        }
+
         for name in payloads {
             let _ = get_app_icon(&name, None).await;
             assert!(!marker.exists(), "app name ran as code: {name}");
