@@ -101,6 +101,28 @@ pub mod icons {
             assert_eq!(listings.load(Ordering::SeqCst), 1);
         }
 
+        /// Lookups at once wait for one of the 4 slots and all resolve, with the
+        /// icon read on the blocking thread.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_icon_lookups_all_resolve() {
+            let started = Instant::now();
+            let lookups: Vec<_> = (0..24)
+                .map(|i| {
+                    let name = ["notepad", "explorer", "msedge"][i % 3];
+                    tokio::spawn(async move { (name, get_app_icon(name, None).await) })
+                })
+                .collect();
+            for lookup in lookups {
+                let (name, icon) = lookup.await.unwrap();
+                assert!(
+                    matches!(&icon, Ok(Some(i)) if i.data.starts_with(b"\x89PNG")),
+                    "{name}: {}",
+                    show(&icon)
+                );
+            }
+            println!("24 lookups at once: all PNG in {:?}", started.elapsed());
+        }
+
         /// Run by the workflow as a new standard (non-admin) local user.
         #[tokio::test]
         #[ignore]
