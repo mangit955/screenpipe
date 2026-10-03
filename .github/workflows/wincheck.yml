@@ -24,5 +24,7 @@ jobs:
           "user: $env:USERNAME; Store packages: $((Get-AppxPackage).Count)"
           (Get-FileHash icons.rs -Algorithm SHA256).Hash
       - run: rustup toolchain install 1.94.0 --profile minimal
+      - name: Failed Store listing is retried (own process, empty cache)
+        run: cargo +1.94.0 test failed_listing -- --nocapture
       - name: cargo test (PR icons.rs, verbatim)
-        run: cargo +1.94.0 test -- --nocapture --test-threads=1
+        run: cargo +1.94.0 test -- --nocapture --test-threads=1 --skip failed_listing
