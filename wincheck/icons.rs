@@ -455,7 +455,7 @@ type AppxListing =
 #[cfg(target_os = "windows")]
 const APPX_PACKAGES_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// Store packages put desktop apps under `VFS\ProgramFilesX64\<vendor>\...`.
+/// Deep enough for packaged desktop apps under `VFS\ProgramFilesX64\<vendor>\...`.
 #[cfg(any(target_os = "windows", test))]
 const APPX_EXE_DEPTH: usize = 8;
 
@@ -544,10 +544,8 @@ fn parse_appx_packages(stdout: &[u8]) -> AppxPackages {
 /// without and then with spaces.
 #[cfg(any(target_os = "windows", test))]
 fn find_appx_exe(packages: &AppxPackages, app_name: &str) -> Option<String> {
-    let name = app_name
-        .strip_suffix(".exe")
-        .unwrap_or(app_name)
-        .to_lowercase();
+    let lower = app_name.to_lowercase();
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
     let compact = name.replace(' ', "");
     if compact.is_empty() {
         // An empty search term would match every package.
@@ -560,7 +558,7 @@ fn find_appx_exe(packages: &AppxPackages, app_name: &str) -> Option<String> {
     if found.is_some() || name == compact {
         return found;
     }
-    find_exe(folder, &name, APPX_EXE_DEPTH)
+    find_exe(folder, name, APPX_EXE_DEPTH)
 }
 
 #[cfg(target_os = "linux")]
@@ -1037,7 +1035,11 @@ mod find_exe_tests {
     #[test]
     fn prefers_an_exe_in_the_folder_over_one_in_a_subfolder() {
         let root = tempfile::tempdir().unwrap();
-        touch(&root.path().join("a-helpers").join("app-helper.exe"));
+        // Several subfolders, so at least one is listed before `app.exe` whatever
+        // order the filesystem returns.
+        for folder in ["a-helpers", "bin", "helpers", "x64", "z-tools"] {
+            touch(&root.path().join(folder).join("app-helper.exe"));
+        }
         let exe = root.path().join("app.exe");
         touch(&exe);
 
@@ -1109,7 +1111,7 @@ mod appx_tests {
 
         let found = Some(calc_exe.to_string_lossy().into_owned());
         assert_eq!(find_appx_exe(&packages, "Calculator"), found);
-        assert_eq!(find_appx_exe(&packages, "calculator.exe"), found);
+        assert_eq!(find_appx_exe(&packages, "Calculator.EXE"), found);
         // The package matches without spaces; the exe is named with them.
         let spaced = root.path().join("calc").join("Windows Calculator.exe");
         touch(&spaced);
