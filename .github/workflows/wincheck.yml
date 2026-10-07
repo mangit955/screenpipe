@@ -1,0 +1,33 @@
+name: wincheck
+on:
+  push:
+    branches: [scratch/wincheck-7522]
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+          rustc -V
+      - name: WebView2 runtime version
+        shell: pwsh
+        run: |
+          Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object pv, name
+          [System.Environment]::OSVersion.VersionString
+      - name: Build
+        shell: pwsh
+        run: cargo build --locked
+      - name: Run scenarios
+        shell: pwsh
+        run: ./run.ps1 -Exe target\debug\wincheck.exe -Out out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wincheck-out
+          path: out/

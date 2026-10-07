@@ -1,0 +1,18 @@
+[package]
+name = "wincheck"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wry = "=0.55.1"
+tao = "=0.35.3"
+webview2-com = "=0.38.2"
+windows-core = "=0.61.2"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
+url = "=2.5.8"
+http = "1"
