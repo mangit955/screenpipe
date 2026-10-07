@@ -67,7 +67,7 @@ The hidden fixture appears only at grading and uses no dependency links.
 This does not establish native recording continuity, real authentication,
 account-switch race safety, browser integration, isolation or model performance.
 
-The current app corpus contains 128 git-mined regressions. See
+The current app corpus contains 133 git-mined regressions. See
 [DESIGN.md](./DESIGN.md) for the Anthropic guidance, source contract, and
 history-mining workflow. The companion website manifest uses this same harness.
 
@@ -1639,3 +1639,51 @@ suppression and missing-module setup errors. Only the frontend calendar module
 is applied from the historical fix. Native endpoint mappings, OS permissions,
 OAuth refresh, publisher backoff, enforced agent isolation and model performance
 remain outside this evidence. Fixtures and dependencies are installed at grading.
+
+
+`app-meeting-stop-save-refusal` mounts the real historical NoteView with synthetic
+editor-input, HTTP and native ports. Five outcomes preserve draft-save ordering,
+overlapping edits, ordinary autosave and unchanged notes, while ensuring an
+explicit Stop still runs once after a failed save, with a warning and no false
+Saved indication. The parent fails that Stop outcome and preserves four; the
+historical reference passes five. Separate current-component checks preserve
+these outcomes with current display and inactive-service adapters.
+Run `bun test evals/coding-agent/calibrate-meeting-stop.test.js` with desktop test
+dependencies available for eleven historical grader controls, including inline warnings, empty feedback, changed
+warning copy, unused correct source, early/duplicate Stop, silent refusal, false
+Saved status and missing-source classification. Hidden fixtures and dependency
+links appear only when grading begins. This does not test editor internals,
+native stop/deferral release, database durability, global recording pause, full
+current dependency parity, execution isolation or model improvement.
+
+## Memory tags around malformed rows
+
+`app-memory-tag-filter-malformed-json` executes actual database list/count methods
+against disposable SQLite databases. Six outcomes cover malformed stored tags,
+exact multi-tag matching, missing tags, full-text search, unfiltered reads, source
+and importance filters, ordering, pagination and preservation of stored values.
+The parent fails four outcomes and preserves two; the historical source-only fix
+passes six. Run `bun test evals/coding-agent/calibrate-memory-tag-filter.test.js`
+for correct, broken, equivalent, disconnected, partial-repair, ignored-filter,
+blanket-filter and missing-source controls. Hidden fixtures appear only at grading.
+No build-cache links are declared. This does not establish sync ingestion, HTTP
+routing, hybrid storage, concurrent writes, execution isolation or model quality.
+
+## Redaction across missing schema targets
+
+`app-redact-missing-schema-target` runs the actual native Worker with local regex
+redaction and synthetic temporary SQLite data. Six outcomes cover missing tables
+and columns, later-row progress, ordinary redaction, clean-text preservation,
+pause/resume, transient-write retry and corruption-error backoff with shutdown.
+The parent fails the two missing-schema outcomes and preserves four; the
+historical reference and current source pass all six. The task discloses the
+small-workload timing bounds and does not require an exact implementation.
+
+Run the shared runner with `--case app-redact-missing-schema-target --verify`.
+The hidden fixture appears only at grading; no dependency or target-cache links
+are declared. Calibration rejects unused correct code, blanket skipping, treating
+all errors as missing schema and lost pause behavior, while accepting an
+equivalent missing-object predicate. Compilation/setup failures are infrastructure
+errors. The malformed-database error is supplied by a synthetic SQLite trigger,
+not an actually corrupt database. This does not establish migration safety,
+capture continuity, real corruption recovery, host isolation or model capability.
