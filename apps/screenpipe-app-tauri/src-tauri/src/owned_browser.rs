@@ -1791,16 +1791,17 @@ fn normalize_url(raw: &str, origins: &AppOrigins) -> Result<url::Url, String> {
             "the owned browser cannot load {url}: only web pages outside the app's own origins"
         ));
     }
-    // wry unwraps `NSURL::URLWithString` when it loads a URL. Before macOS 14
-    // that parser rejects characters `url` leaves raw (`{ } | ^`, a stray `%`),
-    // so refuse here instead of aborting the app.
+    // wry unwraps `NSURL::URLWithString` when it loads a URL. That parser
+    // rejects some URLs `url` accepts: hosts containing `{ } ` "` on every
+    // macOS, and before macOS 14 also raw `{ } | ^` or a stray `%` anywhere.
+    // Refuse those here instead of aborting the app.
     #[cfg(target_os = "macos")]
     if objc2::rc::autoreleasepool(|_| {
         objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(url.as_str()))
             .is_none()
     }) {
         return Err(format!(
-            "this macOS version cannot load {url}; percent-encode its special characters"
+            "macOS cannot load {url}; remove or percent-encode its special characters"
         ));
     }
     Ok(url)
@@ -1893,6 +1894,33 @@ mod normalize_url_tests {
         ] {
             assert!(normalize_url(raw, &ORIGINS).is_err(), "accepted {raw}");
         }
+    }
+
+    #[test]
+    fn refuses_schemes_nobody_listed() {
+        // Only web schemes pass, so a scheme added to WebKit or WebView2 later
+        // is refused too.
+        for raw in [
+            "view-source:https://example.com/",
+            "mailto:someone@example.com",
+            "ftp://example.com/",
+            "ws://example.com/",
+            "chrome://settings",
+            "x-custom://anything",
+        ] {
+            let err = normalize_url(raw, &ORIGINS).unwrap_err();
+            assert!(err.contains("only web pages"), "{raw}: {err}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn refuses_urls_nsurl_cannot_parse() {
+        // `url` accepts this host, but NSURL returns nil for it and wry
+        // unwraps that nil.
+        let err = normalize_url("http://ex{mple.com/", &ORIGINS).unwrap_err();
+        assert!(err.contains("macOS cannot load"), "{err}");
+        assert!(normalize_url("http://example.com/", &ORIGINS).is_ok());
     }
 
     #[test]
@@ -2066,13 +2094,23 @@ mod normalize_url_tests {
     }
 
     #[test]
-    fn eval_result_script_is_self_contained_and_tags_chunks() {
+    fn eval_result_script_writes_the_markers_the_reader_parses() {
         let script = build_eval_result_script("return 42;", "eval-id-1");
 
         assert!(script.contains("return 42;"));
         assert!(script.contains("\"eval-id-1\""));
-        assert!(script.contains("window.__SP_OB_CHUNK__"));
-        assert!(script.contains("id: window.__SP_OB_ID__ || \"\""));
+        // This script, not owned_browser_bridge.js, writes every result marker
+        // `transport::parse_marker` reads, which rejects chunks over CHUNK_SIZE.
+        for expected in [
+            format!("const __sp_chunk_size = {};", transport::CHUNK_SIZE),
+            "chunks: n,".to_string(),
+            "window.__SP_OB_CHUNK__ = function (i)".to_string(),
+            "id: window.__SP_OB_ID__ || \"\"".to_string(),
+            "chunk_seq: i,".to_string(),
+            "chunk_b64: chunkBuf.substr(i * size, size)".to_string(),
+        ] {
+            assert!(script.contains(&expected), "missing {expected}");
+        }
     }
 
     const EVAL_ID: &str = "eval-1";
