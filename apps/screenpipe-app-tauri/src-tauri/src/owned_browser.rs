@@ -201,12 +201,13 @@ impl Drop for SessionPromptGuard {
         // browser while any request is pending.
         if let Ok(mut pending) = pending_session_access().try_lock() {
             pending.remove(&request_id);
+            SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
         } else {
             tauri::async_runtime::spawn(async move {
                 pending_session_access().lock().await.remove(&request_id);
+                SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
             });
         }
-        SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
     }
 }
 
@@ -333,9 +334,10 @@ struct NavigationContext {
 struct OwnedBrowserState {
     inner: Mutex<OwnedBrowserInner>,
     last_title: StdMutex<String>,
-    /// Latest eval result marker, kept apart from `last_title` so a page that
-    /// retitles itself (unread counts, tickers) cannot overwrite a marker
-    /// before the eval reader polls it.
+    /// Latest eval result marker, kept apart from `last_title` so a page title
+    /// reported after a marker (unread counts, tickers) doesn't overwrite it
+    /// before the eval reader polls. The engine reports only the last title
+    /// set in one JS task, so a retitle in the same task still hides a marker.
     last_marker: StdMutex<String>,
     recent_navigations: StdMutex<Vec<NavigationContext>>,
     pending_navigation_id: StdMutex<Option<String>>,
@@ -455,10 +457,17 @@ impl OwnedBrowserState {
         }
     }
 
-    fn record_marker(&self, marker: String) {
-        if let Ok(mut last_marker) = self.last_marker.lock() {
-            *last_marker = marker;
+    /// Record a `document.title` change. Eval result markers go to their own
+    /// slot; returns whether `title` is a page title to show.
+    fn record_document_title(&self, title: &str) -> bool {
+        if title.starts_with(transport::RESULT_TITLE_PREFIX) {
+            if let Ok(mut last_marker) = self.last_marker.lock() {
+                *last_marker = title.to_string();
+            }
+            return false;
         }
+        self.record_title(title.to_string());
+        true
     }
 
     fn latest_title(&self) -> String {
@@ -739,11 +748,9 @@ fn child_webview_builder(
             );
         })
         .on_document_title_changed(move |webview, title| {
-            if title.starts_with(transport::RESULT_TITLE_PREFIX) {
-                state_for_title.record_marker(title);
+            if !state_for_title.record_document_title(&title) {
                 return;
             }
-            state_for_title.record_title(title.clone());
             let committed_url = webview_url(&webview);
             emit_state_event_for(
                 &app_for_title,
@@ -993,7 +1000,12 @@ impl TauriOwnedHandle {
         // browser's ~1KB title cap, so they're pulled in base64 chunks and
         // reassembled — see [`transport`]. The whole read honours `timeout`.
         let start = Instant::now();
-        let payload = match self.read_eval_payload(&active, start, timeout, &id).await {
+        let fetch_chunk = |i| {
+            active
+                .eval(transport::chunk_fetch_js(i))
+                .map_err(|e| e.to_string())
+        };
+        let payload = match read_eval_payload(&self.state, fetch_chunk, start, timeout, &id).await {
             Ok(payload) => payload,
             Err(e) => {
                 // Restore hidden whenever we revealed the webview *only* to run
@@ -1037,109 +1049,104 @@ impl TauriOwnedHandle {
             error: payload.error,
         })
     }
+}
 
-    /// Read one eval's result from the `document.title` transport, honouring the
-    /// overall `timeout` (measured from `start`). An inline result returns
-    /// directly; a chunk header triggers a pull of every base64 chunk, which are
-    /// reassembled into the full payload — so results larger than the browser's
-    /// ~1KB title cap (e.g. a page snapshot) survive intact.
-    async fn read_eval_payload(
-        &self,
-        active: &Webview<Wry>,
-        start: Instant,
-        timeout: Duration,
-        expected_id: &str,
-    ) -> Result<transport::EvalPayload, String> {
-        match self.poll_marker(start, timeout, None, expected_id).await? {
-            transport::Marker::Result(payload) => Ok(payload),
-            transport::Marker::Chunk { seq, .. } => Err(format!(
-                "owned-browser eval: got chunk {seq} before a header"
-            )),
-            transport::Marker::Header { chunks, .. } => {
-                transport::check_chunk_count(chunks)?;
-                let mut parts: Vec<String> = Vec::with_capacity(chunks);
-                for i in 0..chunks {
-                    active
-                        .eval(transport::chunk_fetch_js(i))
-                        .map_err(|e| format!("owned-browser fetch chunk {i}: {e}"))?;
-                    match self
-                        .poll_marker(start, timeout, Some(i), expected_id)
-                        .await?
-                    {
-                        transport::Marker::Chunk { seq, b64, .. } if seq == i => parts.push(b64),
-                        other => {
-                            return Err(format!(
-                                "owned-browser eval: expected chunk {i}, got {other:?}"
-                            ))
-                        }
+/// Read one eval's result from the `document.title` transport, honouring the
+/// overall `timeout` (measured from `start`). An inline result returns
+/// directly; a chunk header triggers a pull of every base64 chunk, which are
+/// reassembled into the full payload — so results larger than the browser's
+/// ~1KB title cap (e.g. a page snapshot) survive intact. `fetch_chunk(i)` asks
+/// the page to write chunk `i`.
+async fn read_eval_payload(
+    state: &OwnedBrowserState,
+    mut fetch_chunk: impl FnMut(usize) -> Result<(), String>,
+    start: Instant,
+    timeout: Duration,
+    expected_id: &str,
+) -> Result<transport::EvalPayload, String> {
+    match poll_marker(state, start, timeout, None, expected_id).await? {
+        transport::Marker::Result(payload) => Ok(payload),
+        transport::Marker::Chunk { seq, .. } => Err(format!(
+            "owned-browser eval: got chunk {seq} before a header"
+        )),
+        transport::Marker::Header { chunks, .. } => {
+            transport::check_chunk_count(chunks)?;
+            let mut parts: Vec<String> = Vec::with_capacity(chunks);
+            for i in 0..chunks {
+                fetch_chunk(i).map_err(|e| format!("owned-browser fetch chunk {i}: {e}"))?;
+                match poll_marker(state, start, timeout, Some(i), expected_id).await? {
+                    transport::Marker::Chunk { seq, b64, .. } if seq == i => parts.push(b64),
+                    other => {
+                        return Err(format!(
+                            "owned-browser eval: expected chunk {i}, got {other:?}"
+                        ))
                     }
                 }
-                let json = transport::reassemble_chunks(&parts)?;
-                serde_json::from_str::<transport::EvalPayload>(&json)
-                    .map_err(|e| format!("parse chunked eval result: {e}"))
             }
+            let json = transport::reassemble_chunks(&parts)?;
+            serde_json::from_str::<transport::EvalPayload>(&json)
+                .map_err(|e| format!("parse chunked eval result: {e}"))
         }
     }
+}
 
-    /// Poll the result-transport title (50ms cadence) until a marker appears or
-    /// `timeout` elapses. With `want_seq = Some(i)`, only a chunk marker with
-    /// that seq satisfies the wait — so we don't latch the header or a previous
-    /// chunk's still-current title; `None` accepts the first marker seen.
-    async fn poll_marker(
-        &self,
-        start: Instant,
-        timeout: Duration,
-        want_seq: Option<usize>,
-        expected_id: &str,
-    ) -> Result<transport::Marker, String> {
-        loop {
-            if start.elapsed() >= timeout {
-                let waiting_for = match want_seq {
-                    Some(seq) => format!("chunk {seq}"),
-                    None => "the result".to_string(),
-                };
-                return Err(format!(
-                    "owned-browser eval timed out after {}s waiting for {waiting_for} (last title: {:?})",
-                    timeout.as_secs(),
-                    self.state.latest_title()
-                ));
-            }
-            let title = self.state.take_marker();
-            if let Some(rest) = title.strip_prefix(transport::RESULT_TITLE_PREFIX) {
-                let marker = transport::parse_marker(rest)?;
-                let marker_id = match &marker {
-                    transport::Marker::Result(payload) => payload.id.as_str(),
-                    transport::Marker::Header { id, .. } => id.as_str(),
-                    transport::Marker::Chunk { id, .. } => id.as_str(),
-                };
-                if marker_id != expected_id {
-                    warn!(
-                        "owned-browser eval ignored stale result id (got {}, expected {})",
-                        marker_id, expected_id
-                    );
-                    continue;
-                }
-                match want_seq {
-                    // Waiting for a specific chunk: accept only that seq; a stale
-                    // header / earlier chunk title means keep polling.
-                    Some(want) => {
-                        if matches!(&marker, transport::Marker::Chunk { seq, .. } if *seq == want) {
-                            return Ok(marker);
-                        }
-                    }
-                    // First-marker wait (inline result or chunk header).
-                    None => match marker {
-                        transport::Marker::Chunk { seq, .. } => {
-                            return Err(format!(
-                                "owned-browser eval: got chunk {seq} before a header"
-                            ))
-                        }
-                        other => return Ok(other),
-                    },
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+/// Poll the result marker slot (50ms cadence) until a marker for `expected_id`
+/// appears or `timeout` elapses. With `want_seq = Some(i)`, only a chunk
+/// marker with that seq satisfies the wait; `None` accepts the first marker.
+async fn poll_marker(
+    state: &OwnedBrowserState,
+    start: Instant,
+    timeout: Duration,
+    want_seq: Option<usize>,
+    expected_id: &str,
+) -> Result<transport::Marker, String> {
+    loop {
+        if start.elapsed() >= timeout {
+            let waiting_for = match want_seq {
+                Some(seq) => format!("chunk {seq}"),
+                None => "the result".to_string(),
+            };
+            return Err(format!(
+                "owned-browser eval timed out after {}s waiting for {waiting_for} (last title: {:?})",
+                timeout.as_secs(),
+                state.latest_title()
+            ));
         }
+        let title = state.take_marker();
+        if let Some(rest) = title.strip_prefix(transport::RESULT_TITLE_PREFIX) {
+            let marker = transport::parse_marker(rest)?;
+            let marker_id = match &marker {
+                transport::Marker::Result(payload) => payload.id.as_str(),
+                transport::Marker::Header { id, .. } => id.as_str(),
+                transport::Marker::Chunk { id, .. } => id.as_str(),
+            };
+            if marker_id != expected_id {
+                warn!(
+                    "owned-browser eval ignored stale result id (got {}, expected {})",
+                    marker_id, expected_id
+                );
+                continue;
+            }
+            match want_seq {
+                // Waiting for a specific chunk: accept only that seq; a stale
+                // header / earlier chunk title means keep polling.
+                Some(want) => {
+                    if matches!(&marker, transport::Marker::Chunk { seq, .. } if *seq == want) {
+                        return Ok(marker);
+                    }
+                }
+                // First-marker wait (inline result or chunk header).
+                None => match marker {
+                    transport::Marker::Chunk { seq, .. } => {
+                        return Err(format!(
+                            "owned-browser eval: got chunk {seq} before a header"
+                        ))
+                    }
+                    other => return Ok(other),
+                },
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -1790,14 +1797,18 @@ fn normalize_url(raw: &str, origins: &AppOrigins) -> Result<url::Url, String> {
 #[cfg(test)]
 mod normalize_url_tests {
     use super::{
-        browser_tab_state, build_eval_result_script, existing_browser_tab_state, is_web_page_url,
-        normalize_url, pending_session_access, session_host_key,
-        session_prompt_in_flight_timeout_error, session_prompt_timeout_error, AppOrigins,
-        OwnedBrowserState, SessionPromptGuard, SESSION_ACCESS_PROMPT_IN_FLIGHT,
+        browser_session_decision_for_url, browser_tab_state, build_eval_result_script,
+        existing_browser_tab_state, is_web_page_url, normalize_url, pending_session_access,
+        read_eval_payload, session_host_key, session_prompt_in_flight_timeout_error,
+        session_prompt_timeout_error, transport, webkit_same_site, AppOrigins, OwnedBrowserState,
+        SessionPromptGuard, GLOBAL_SESSION_ACCESS_DISABLED, GLOBAL_SESSION_ACCESS_GRANTED,
+        SESSION_ACCESS_PROMPT_IN_FLIGHT,
     };
+    use base64::Engine;
+    use serde_json::json;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// A release build on macOS or Linux.
     const ORIGINS: AppOrigins = AppOrigins {
@@ -1983,30 +1994,63 @@ mod normalize_url_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_session_prompt_frees_the_prompt_slot() {
+    #[serial_test::serial(owned_browser_session_prompt)]
+    async fn dropping_a_waiting_session_prompt_frees_the_slot() {
+        GLOBAL_SESSION_ACCESS_DISABLED.store(false, Ordering::SeqCst);
+        GLOBAL_SESSION_ACCESS_GRANTED.store(false, Ordering::SeqCst);
+        SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
+        let app = tauri::test::mock_app();
+        let state = Arc::new(OwnedBrowserState::new());
+        let url = url::Url::parse("https://mail.example.com/").unwrap();
+
+        let mut request = Box::pin(browser_session_decision_for_url(app.handle(), &url, &state));
+        // The prompt is on screen and the request waits for the user.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut request)
+                .await
+                .is_err()
+        );
+        assert!(SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst));
+        assert_eq!(pending_session_access().lock().await.len(), 1);
+
+        // The HTTP client gives up: its request future is dropped mid-wait.
+        drop(request);
+        assert!(!SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst));
+        assert!(pending_session_access().lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(owned_browser_session_prompt)]
+    async fn prompt_slot_stays_taken_until_a_locked_request_is_forgotten() {
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        pending_session_access()
-            .lock()
-            .await
-            .insert("cancelled-prompt".into(), tx);
+        let mut pending = pending_session_access().lock().await;
+        pending.insert("locked-prompt".into(), tx);
         SESSION_ACCESS_PROMPT_IN_FLIGHT.store(true, Ordering::SeqCst);
 
-        // An HTTP client that gives up drops the request future mid-wait.
-        let waiting = async {
-            let _prompt = SessionPromptGuard {
-                request_id: "cancelled-prompt".into(),
-            };
-            std::future::pending::<()>().await;
-        };
-        assert!(tokio::time::timeout(Duration::from_millis(10), waiting)
-            .await
-            .is_err());
+        drop(SessionPromptGuard {
+            request_id: "locked-prompt".into(),
+        });
+        assert!(SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst));
 
+        drop(pending);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(!SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst));
         assert!(!pending_session_access()
             .lock()
             .await
-            .contains_key("cancelled-prompt"));
+            .contains_key("locked-prompt"));
+    }
+
+    #[test]
+    fn imported_cookies_without_same_site_default_to_lax() {
+        assert_eq!(webkit_same_site(-1), "Lax");
+        assert_eq!(webkit_same_site(0), "None");
+        assert_eq!(webkit_same_site(1), "Lax");
+        assert_eq!(webkit_same_site(2), "Strict");
+        assert_eq!(webkit_same_site(7), "Lax");
     }
 
     #[test]
@@ -2019,23 +2063,101 @@ mod normalize_url_tests {
         assert!(script.contains("id: window.__SP_OB_ID__ || \"\""));
     }
 
+    const EVAL_ID: &str = "eval-1";
+
+    fn marker(value: serde_json::Value) -> String {
+        format!("{}{value}", transport::RESULT_TITLE_PREFIX)
+    }
+
+    async fn read(
+        state: &OwnedBrowserState,
+        fetch_chunk: impl FnMut(usize) -> Result<(), String>,
+        timeout_ms: u64,
+    ) -> Result<transport::EvalPayload, String> {
+        let timeout = Duration::from_millis(timeout_ms);
+        read_eval_payload(state, fetch_chunk, Instant::now(), timeout, EVAL_ID).await
+    }
+
     #[test]
-    fn page_retitle_does_not_overwrite_a_pending_result_marker() {
+    fn result_markers_never_become_the_page_title() {
         let state = OwnedBrowserState::new();
-        let marker = format!(
-            r#"{}{{"id":"1","ok":true}}"#,
-            super::transport::RESULT_TITLE_PREFIX
-        );
-        state.record_marker(marker.clone());
-        state.record_title("(3) Inbox".into());
+        let marker = marker(json!({"id": "1", "ok": true}));
+        assert!(!state.record_document_title(&marker));
+        assert!(state.record_document_title("(3) Inbox"));
         assert_eq!(state.take_marker(), marker);
         assert_eq!(state.latest_title(), "(3) Inbox");
         // A read leaves nothing for the next eval to skip as stale.
         assert_eq!(state.take_marker(), "");
     }
 
-    // The `document.title` result-transport logic (inline + chunked) and the
-    // title-restore helper are unit-tested in `owned_browser_transport`.
+    #[tokio::test]
+    async fn forged_chunk_count_fails_the_eval_instead_of_aborting() {
+        let state = OwnedBrowserState::new();
+        // The page shares the bridge's JS realm, so it can write a header for
+        // the running eval. Preallocating for it aborted the app.
+        state.record_document_title(&marker(
+            json!({"id": EVAL_ID, "chunks": 100_000_000_000_000_000u64}),
+        ));
+        let err = read(&state, |_| Ok(()), 1_000).await.unwrap_err();
+        assert!(err.contains("return less data"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn oversized_header_from_an_earlier_eval_is_skipped() {
+        let state = Arc::new(OwnedBrowserState::new());
+        state.record_document_title(&marker(
+            json!({"id": "earlier-eval", "chunks": 100_000_000_000_000_000u64}),
+        ));
+        let page = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            page.record_document_title(&marker(json!({"id": EVAL_ID, "ok": true, "result": 7})));
+        });
+        let payload = read(&state, |_| Ok(()), 2_000).await.unwrap();
+        assert_eq!(payload.result, Some(json!(7)));
+    }
+
+    #[tokio::test]
+    async fn chunked_result_survives_a_page_that_retitles_after_every_marker() {
+        let state = OwnedBrowserState::new();
+        let payload = json!({"id": EVAL_ID, "ok": true, "result": "x → ".repeat(2_000)});
+        let encoded = base64::engine::general_purpose::STANDARD.encode(payload.to_string());
+        let parts: Vec<&str> = encoded
+            .as_bytes()
+            .chunks(transport::CHUNK_SIZE)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap())
+            .collect();
+        assert!(parts.len() > 2);
+
+        state.record_document_title(&marker(json!({"id": EVAL_ID, "chunks": parts.len()})));
+        state.record_document_title("(3) Inbox");
+        let got = read(
+            &state,
+            |i| {
+                state.record_document_title(&marker(
+                    json!({"id": EVAL_ID, "chunk_seq": i, "chunk_b64": parts[i]}),
+                ));
+                state.record_document_title(&format!("({i}) Inbox"));
+                Ok(())
+            },
+            2_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.result, Some(payload["result"].clone()));
+        assert_eq!(state.latest_title(), format!("({}) Inbox", parts.len() - 1));
+    }
+
+    #[tokio::test]
+    async fn a_missing_chunk_times_out_naming_it() {
+        let state = OwnedBrowserState::new();
+        state.record_document_title(&marker(json!({"id": EVAL_ID, "chunks": 2})));
+        let err = read(&state, |_| Ok(()), 300).await.unwrap_err();
+        assert!(err.contains("waiting for chunk 0"), "{err}");
+    }
+
+    // Marker parsing, chunk reassembly and the title-restore helper are
+    // unit-tested in `owned_browser_transport`.
 
     #[test]
     fn redirect_committed_url_keeps_same_navigation_context() {
@@ -2630,8 +2752,8 @@ async fn browser_session_available_for_url(
     true
 }
 
-async fn browser_session_decision_for_url(
-    app: &AppHandle,
+async fn browser_session_decision_for_url<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     url: &url::Url,
     state: &Arc<OwnedBrowserState>,
 ) -> BrowserSessionDecision {
@@ -2801,6 +2923,18 @@ async fn browser_session_decision_for_url(
     decision
 }
 
+/// WebKit `SameSite` value for Chromium's `same_site` column. Chrome treats -1
+/// (unspecified) as Lax; WebKit would treat a missing attribute as None and
+/// send the cookie on cross-site requests from any page in the owned browser.
+#[cfg(any(target_os = "macos", test))]
+fn webkit_same_site(chromium: i32) -> &'static str {
+    match chromium {
+        0 => "None",
+        2 => "Strict",
+        _ => "Lax",
+    }
+}
+
 /// macOS only: push a batch of cookies (read from the user's real
 /// browser by [`crate::owned_browser_cookies::cookies_for_host`]) into
 /// the shared `WKHTTPCookieStore` so the next `webview.navigate(url)`
@@ -2886,15 +3020,7 @@ async fn inject_cookies_macos(
                     let s: id = NSString::alloc(nil).init_str("TRUE");
                     push("Discard", s, &mut keys, &mut vals);
                 }
-                // Chromium same_site mapping. Chrome treats -1 (unspecified)
-                // as Lax; WebKit would treat a missing attribute as None and
-                // send the cookie on cross-site requests from any page here.
-                let same_site = match c.same_site {
-                    0 => "None",
-                    2 => "Strict",
-                    _ => "Lax",
-                };
-                let v: id = NSString::alloc(nil).init_str(same_site);
+                let v: id = NSString::alloc(nil).init_str(webkit_same_site(c.same_site));
                 push("SameSite", v, &mut keys, &mut vals);
                 // NSHTTPCookieVersion = 0 → classic Netscape semantics.
                 let zero: id = NSString::alloc(nil).init_str("0");

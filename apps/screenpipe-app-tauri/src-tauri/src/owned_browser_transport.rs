@@ -41,7 +41,10 @@ pub const RESULT_TITLE_PREFIX: &str = "__SP_OWNED_BROWSER_RESULT__:";
 /// prefix and JSON envelope, fits the ~1KB title cap.
 pub const CHUNK_SIZE: usize = 700;
 
-/// Most chunks one result may span: ~16 MiB of base64, ~12 MiB of JSON.
+/// Most chunks a header may announce: ~16 MiB of base64, ~12 MiB of JSON. A
+/// memory bound against forged headers, not a size real results reach: the
+/// reader polls one chunk at a time, so the eval timeout ends a real read of
+/// a few hundred KB first.
 pub const MAX_CHUNKS: usize = 16 * 1024 * 1024 / CHUNK_SIZE;
 
 /// Bridge installed as the child webview's `initialization_script` — defines
