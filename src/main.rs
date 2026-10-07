@@ -25,7 +25,7 @@ use std::{
 use tao::{
     dpi::{LogicalPosition, LogicalSize},
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
 };
 use webview2_com::{
@@ -145,6 +145,8 @@ fn apply_filter_block(platform: &Platform) {
 static LOG: OnceLock<Mutex<File>> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
 static PROTOCOL_HITS: AtomicUsize = AtomicUsize::new(0);
+static UI_TICKS: AtomicUsize = AtomicUsize::new(0);
+static LAST_UI_TICK_MS: AtomicUsize = AtomicUsize::new(0);
 static RECORDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static NAV_IDS: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
 
@@ -539,7 +541,8 @@ fn main() {
         short(&start_url)
     ));
 
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoopBuilder::<Cmd>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
         .with_title(format!("wincheck {name}"))
         .with_inner_size(LogicalSize::new(980.0, 700.0))
@@ -606,38 +609,77 @@ fn main() {
         log(format!("[harness] observers failed: {e}"));
     }
 
-    let started = Instant::now();
-    let late_at = Duration::from_millis(1000);
-    let capture_at = Duration::from_millis(5000);
-    let exit_at = Duration::from_millis(8000);
-    let mut applied_late = false;
-    let mut captured = false;
-    let png = out_dir.join(format!("{name}-capture.png"));
-
-    event_loop.run(move |event, _, control_flow| {
-        let _keep = (&window, &webview, &context);
-        let elapsed = started.elapsed();
-        if apply_late && !applied_late && elapsed >= late_at {
-            applied_late = true;
-            apply_filter_block(&platform);
-        }
-        if !captured && elapsed >= capture_at {
-            captured = true;
-            unsafe { capture_preview(&core, png.clone()) };
-        }
-        if elapsed >= exit_at {
-            summary(&name);
-            log("[harness] clean exit 0");
-            std::process::exit(0);
-        }
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            summary(&name);
-            std::process::exit(0);
+    // A watchdog thread drives the timeline through the event loop proxy, so
+    // the run never depends on the loop's own timer. UI ticks show whether the
+    // UI thread is still processing events.
+    let late = apply_late;
+    let watchdog_name = name.clone();
+    std::thread::spawn(move || {
+        let t0 = Instant::now();
+        let mut sent_late = false;
+        let mut sent_capture = false;
+        let mut sent_exit = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(250));
+            let ms = t0.elapsed().as_millis() as u64;
+            let _ = proxy.send_event(Cmd::Tick);
+            if late && !sent_late && ms >= 1000 {
+                sent_late = true;
+                let _ = proxy.send_event(Cmd::ApplyLate);
+            }
+            if !sent_capture && ms >= 5000 {
+                sent_capture = true;
+                let _ = proxy.send_event(Cmd::Capture);
+            }
+            if !sent_exit && ms >= 8000 {
+                sent_exit = true;
+                let _ = proxy.send_event(Cmd::Exit);
+            }
+            if ms >= 11000 {
+                summary(&watchdog_name);
+                log(format!(
+                    "[watchdog] UI thread did not exit: ui_ticks={} last_ui_tick_ms={}; exiting 7",
+                    UI_TICKS.load(Ordering::SeqCst),
+                    LAST_UI_TICK_MS.load(Ordering::SeqCst)
+                ));
+                std::process::exit(7);
+            }
         }
     });
+
+    let png = out_dir.join(format!("{name}-capture.png"));
+    event_loop.run(move |event, _, control_flow| {
+        let _keep = (&window, &webview, &context);
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::UserEvent(Cmd::Tick) => {
+                UI_TICKS.fetch_add(1, Ordering::SeqCst);
+                let ms = START.get().map(|s| s.elapsed().as_millis()).unwrap_or(0) as usize;
+                LAST_UI_TICK_MS.store(ms, Ordering::SeqCst);
+            }
+            Event::UserEvent(Cmd::ApplyLate) => apply_filter_block(&platform),
+            Event::UserEvent(Cmd::Capture) => unsafe { capture_preview(&core, png.clone()) },
+            Event::UserEvent(Cmd::Exit)
+            | Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                summary(&name);
+                log(format!(
+                    "[harness] clean exit 0 (ui_ticks={})",
+                    UI_TICKS.load(Ordering::SeqCst)
+                ));
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+    });
+}
+
+#[derive(Debug)]
+enum Cmd {
+    Tick,
+    ApplyLate,
+    Capture,
+    Exit,
 }

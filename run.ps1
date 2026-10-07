@@ -1,6 +1,6 @@
 # Runs each scenario in a fresh process with a hard 20 s timeout, takes a
 # desktop screenshot at 6 s, and records the exit code.
-param([string]$Exe = "target\debug\wincheck.exe", [string]$Out = "out")
+param([string]$Exe = "target\debug\wincheck.exe", [string]$Out = "out", [string]$Runs = "")
 $ErrorActionPreference = 'Continue'
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
@@ -27,6 +27,7 @@ $runs = @(
   's9 control','s9 filter','s9late late','s9late filter',
   's10a filter','s10a nonav','s10b filter','s10b nonav','s10c filter','s10c nonav'
 )
+if ($Runs) { $runs = $Runs.Split(',') }
 $results = @()
 foreach ($r in $runs) {
   $scenario, $mode = $r.Split(' ')
