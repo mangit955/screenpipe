@@ -178,11 +178,14 @@ fn main() -> wry::Result<()> {
     };
     log!("START scenario={scenario} mode={mode} url={url}");
 
+    log!("STEP event_loop_new");
     let event_loop = EventLoop::new();
+    log!("STEP window_build");
     let window = WindowBuilder::new()
         .with_title("wv-harness")
         .build(&event_loop)
         .unwrap();
+    log!("STEP window_built");
 
     let origins = AppOrigins {
         dev_server: None,
@@ -227,6 +230,7 @@ fn main() -> wry::Result<()> {
         });
     }
 
+    log!("STEP build_gtk");
     let webview = {
         use tao::platform::unix::WindowExtUnix;
         use wry::WebViewBuilderExtUnix;
@@ -234,6 +238,7 @@ fn main() -> wry::Result<()> {
         builder.build_gtk(vbox)?
     };
 
+    log!("STEP built");
     if fix {
         use wry::WebViewExtUnix;
         let platform = Platform(webview.webview());
@@ -242,6 +247,7 @@ fn main() -> wry::Result<()> {
     }
 
     let deadline = Instant::now() + Duration::from_secs(secs);
+    log!("STEP run");
     event_loop.run(move |event, _, control_flow| {
         let _keep = (&webview, &window);
         *control_flow = ControlFlow::WaitUntil(deadline);
