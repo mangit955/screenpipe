@@ -625,7 +625,7 @@ fn add_child_webview(
 ) -> tauri::Result<Webview<Wry>> {
     let child = window.add_child(builder, position, size)?;
     #[cfg(windows)]
-    let dev_server = dev_server_url(window.app_handle());
+    let origins = app_origins(window.app_handle());
     child.with_webview(move |platform| {
         #[cfg(target_os = "macos")]
         unsafe {
@@ -643,14 +643,15 @@ fn add_child_webview(
                 // `on_navigation` only sees top-level loads on Windows. WebKit
                 // also sends iframes through it, so filter them here to match.
                 let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
-                    if let Some(args) = args {
-                        let mut uri = windows_core::PWSTR::null();
-                        args.Uri(&mut uri)?;
-                        let allowed = url::Url::parse(&take_pwstr(uri))
-                            .is_ok_and(|url| is_web_page_url(&url, dev_server.as_ref()));
-                        args.SetCancel(!allowed)?;
-                    }
-                    Ok(())
+                    let Some(args) = args else {
+                        return Ok(());
+                    };
+                    // A URI that can't be read or parsed is not allowed.
+                    let mut uri = windows_core::PWSTR::null();
+                    let allowed = args.Uri(&mut uri).is_ok()
+                        && url::Url::parse(&take_pwstr(uri))
+                            .is_ok_and(|url| is_web_page_url(&url, &origins));
+                    args.SetCancel(!allowed)
                 }));
                 let mut token = 0;
                 let _ = webview.add_FrameNavigationStarting(&handler, &mut token);
@@ -683,13 +684,13 @@ fn child_webview_builder(
     let tab_for_title = tab_id.clone();
     let tab_for_nav = tab_id.clone();
     let tab_for_page_load = tab_id;
-    let dev_server = dev_server_url(app);
+    let origins = app_origins(app);
     let builder = tauri::webview::WebviewBuilder::new(label.to_string(), url)
         .initialization_script(transport::BRIDGE_INIT_SCRIPT)
         .background_throttling(BackgroundThrottlingPolicy::Disabled)
         .on_navigation(move |url| {
             // Pages navigate and redirect without going through normalize_url.
-            if !is_web_page_url(url, dev_server.as_ref()) {
+            if !is_web_page_url(url, &origins) {
                 // Not `warn!`: a page can retry this in a tight loop, and warnings
                 // reach the log file and Sentry.
                 debug!(
@@ -913,7 +914,7 @@ impl TauriOwnedHandle {
         let _guard = self.eval_lock.lock().await;
 
         let target_url = if let Some(target) = url {
-            Some(normalize_url(&target, dev_server_url(&self.app).as_ref())?)
+            Some(normalize_url(&target, &app_origins(&self.app))?)
         } else {
             None
         };
@@ -1182,7 +1183,7 @@ impl OwnedWebviewHandle for TauriOwnedHandle {
     /// own titles. The frontend sidebar listens for `NAVIGATE_EVENT` and
     /// reveals/positions the webview itself.
     async fn navigate(&self, url: &str, owner: Option<&str>) -> Result<(), String> {
-        let parsed: url::Url = normalize_url(url, dev_server_url(&self.app).as_ref())?;
+        let parsed: url::Url = normalize_url(url, &app_origins(&self.app))?;
 
         // Push the user's real-browser cookies for this host into
         // WKHTTPCookieStore before issuing the navigate, so the request
@@ -1670,32 +1671,45 @@ pub async fn owned_browser_tab_set_bounds(
     Ok(())
 }
 
-/// The dev server, which Tauri treats as the app's own origin in dev builds.
-fn dev_server_url(app: &AppHandle) -> Option<url::Url> {
-    if tauri::is_dev() {
-        app.config().build.dev_url.clone()
-    } else {
-        None
+/// The app's own origins, which Tauri grants the app's IPC permissions.
+struct AppOrigins {
+    /// The dev server, which Tauri treats as the app's origin in dev builds.
+    dev_server: Option<url::Url>,
+    /// The app's custom protocols run over http hosts, as on Windows. See
+    /// [`is_windows_app_url`].
+    windows: bool,
+}
+
+fn app_origins(app: &AppHandle) -> AppOrigins {
+    AppOrigins {
+        dev_server: if tauri::is_dev() {
+            app.config().build.dev_url.clone()
+        } else {
+            None
+        },
+        windows: cfg!(windows),
     }
 }
 
 /// Whether the owned browser may load `url`. Tauri grants IPC to the app's own
 /// origins: its custom protocols (`tauri:`, `ipc:`, `asset:`; see
-/// [`is_windows_app_host`] for Windows) and the dev server. A page that reached
+/// [`is_windows_app_url`] for Windows) and the dev server. A page that reached
 /// one would run with the app's capabilities, so only web URLs outside those
 /// origins pass. Iframes need `about:`, `data:` and `blob:`; a `blob:` URL
 /// carries the origin of the page that created it.
-fn is_web_page_url(url: &url::Url, dev_server: Option<&url::Url>) -> bool {
+fn is_web_page_url(url: &url::Url, origins: &AppOrigins) -> bool {
     match url.scheme() {
         "http" | "https" => {
-            let app_host = cfg!(windows) && url.host_str().is_some_and(is_windows_app_host);
-            !app_host && dev_server.is_none_or(|dev| dev.origin() != url.origin())
+            !(origins.windows && is_windows_app_url(url))
+                && origins
+                    .dev_server
+                    .as_ref()
+                    .is_none_or(|dev| dev.origin() != url.origin())
         }
         "about" | "data" => true,
         "blob" => match url::Url::parse(url.path()) {
             Ok(creator) => {
-                matches!(creator.scheme(), "http" | "https")
-                    && is_web_page_url(&creator, dev_server)
+                matches!(creator.scheme(), "http" | "https") && is_web_page_url(&creator, origins)
             }
             // Opaque creator such as a sandboxed frame: `blob:null/<id>`.
             Err(_) => true,
@@ -1704,13 +1718,22 @@ fn is_web_page_url(url: &url::Url, dev_server: Option<&url::Url>) -> bool {
     }
 }
 
-/// Whether `host` serves the app's custom protocols on Windows, where they run
-/// over http(s). Tauri trusts `<protocol>.localhost`; every `.localhost` host
-/// is blocked so a protocol added later is covered too. wry also routes
-/// `<protocol>.<any host>` to the protocol, which would serve app files there.
-fn is_windows_app_host(host: &str) -> bool {
-    host.ends_with(".localhost")
-        || matches!(host.split('.').next(), Some("tauri" | "ipc" | "asset"))
+/// Whether an http(s) URL reaches the app's custom protocols on Windows.
+/// Tauri trusts `<protocol>.localhost` over http and https; every `.localhost`
+/// host is blocked so a protocol added later is covered too. wry serves a
+/// protocol at any URL starting with `http://<protocol>.`, compared as a raw
+/// string, so `http://tauri.example.com/` and `http://tauri.localhost@example.com/`
+/// count. That routing is http-only because the app leaves `useHttpsScheme`
+/// off, so `https://tauri.app` is a normal site.
+fn is_windows_app_url(url: &url::Url) -> bool {
+    url.host_str()
+        .is_some_and(|host| host.ends_with(".localhost"))
+        || url.as_str().strip_prefix("http://").is_some_and(|rest| {
+            ["tauri", "ipc", "asset"].iter().any(|protocol| {
+                rest.strip_prefix(protocol)
+                    .is_some_and(|rest| rest.starts_with('.'))
+            })
+        })
 }
 
 /// Normalise a user-supplied URL string into a full `url::Url` the owned
@@ -1720,7 +1743,7 @@ fn is_windows_app_host(host: &str) -> bool {
 /// fully-qualified URLs (`https://youtube.com`), and hostless schemes
 /// (`about:blank`, `data:...`).  Anything that looks like it
 /// is missing a scheme gets `https://` prepended before parsing.
-fn normalize_url(raw: &str, dev_server: Option<&url::Url>) -> Result<url::Url, String> {
+fn normalize_url(raw: &str, origins: &AppOrigins) -> Result<url::Url, String> {
     // Hostless schemes that don't use `://`. Keep this conservative so that
     // `localhost:8080` (host:port, not a scheme) still gets `https://` prepended.
     const HOSTLESS_SCHEMES: &[&str] = &[
@@ -1744,7 +1767,7 @@ fn normalize_url(raw: &str, dev_server: Option<&url::Url>) -> Result<url::Url, S
     let url = candidate
         .parse::<url::Url>()
         .map_err(|e| format!("invalid url: {e}"))?;
-    if !is_web_page_url(&url, dev_server) {
+    if !is_web_page_url(&url, origins) {
         return Err(format!(
             "the owned browser cannot load {url}: only web pages outside the app's own origins"
         ));
@@ -1768,38 +1791,56 @@ fn normalize_url(raw: &str, dev_server: Option<&url::Url>) -> Result<url::Url, S
 mod normalize_url_tests {
     use super::{
         browser_tab_state, build_eval_result_script, existing_browser_tab_state, is_web_page_url,
-        is_windows_app_host, normalize_url, pending_session_access, session_host_key,
-        session_prompt_in_flight_timeout_error, session_prompt_timeout_error, OwnedBrowserState,
-        SessionPromptGuard, SESSION_ACCESS_PROMPT_IN_FLIGHT,
+        normalize_url, pending_session_access, session_host_key,
+        session_prompt_in_flight_timeout_error, session_prompt_timeout_error, AppOrigins,
+        OwnedBrowserState, SessionPromptGuard, SESSION_ACCESS_PROMPT_IN_FLIGHT,
     };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// A release build on macOS or Linux.
+    const ORIGINS: AppOrigins = AppOrigins {
+        dev_server: None,
+        windows: false,
+    };
+    /// A release build on Windows, where the app's protocols run over http.
+    const WINDOWS: AppOrigins = AppOrigins {
+        dev_server: None,
+        windows: true,
+    };
+
+    fn with_dev_server(url: &str) -> AppOrigins {
+        AppOrigins {
+            dev_server: Some(url::Url::parse(url).unwrap()),
+            windows: false,
+        }
+    }
+
     #[test]
     fn keeps_fully_qualified() {
-        let u = normalize_url("https://youtube.com", None).unwrap();
+        let u = normalize_url("https://youtube.com", &ORIGINS).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("youtube.com"));
     }
 
     #[test]
     fn adds_https_to_bare_host() {
-        let u = normalize_url("youtube.com", None).unwrap();
+        let u = normalize_url("youtube.com", &ORIGINS).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("youtube.com"));
     }
 
     #[test]
     fn adds_https_to_protocol_relative() {
-        let u = normalize_url("//youtube.com", None).unwrap();
+        let u = normalize_url("//youtube.com", &ORIGINS).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("youtube.com"));
     }
 
     #[test]
     fn adds_https_to_host_port() {
-        let u = normalize_url("localhost:8080", None).unwrap();
+        let u = normalize_url("localhost:8080", &ORIGINS).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("localhost"));
         assert_eq!(u.port(), Some(8080));
@@ -1807,14 +1848,14 @@ mod normalize_url_tests {
 
     #[test]
     fn preserves_about_blank() {
-        let u = normalize_url("about:blank", None).unwrap();
+        let u = normalize_url("about:blank", &ORIGINS).unwrap();
         assert_eq!(u.scheme(), "about");
         assert_eq!(u.path(), "blank");
     }
 
     #[test]
     fn preserves_data_url() {
-        let u = normalize_url("data:text/plain,hello", None).unwrap();
+        let u = normalize_url("data:text/plain,hello", &ORIGINS).unwrap();
         assert_eq!(u.scheme(), "data");
     }
 
@@ -1827,36 +1868,50 @@ mod normalize_url_tests {
             "file:///etc/passwd",
             "javascript:alert(1)",
         ] {
-            assert!(normalize_url(raw, None).is_err(), "accepted {raw}");
+            assert!(normalize_url(raw, &ORIGINS).is_err(), "accepted {raw}");
         }
     }
 
     #[test]
     fn rejects_the_dev_server_origin() {
-        let dev = url::Url::parse("http://localhost:1420").unwrap();
-        assert!(normalize_url("http://localhost:1420/viewer", Some(&dev)).is_err());
-        assert!(normalize_url("http://localhost:3000/", Some(&dev)).is_ok());
+        let dev = with_dev_server("http://localhost:1420");
+        assert!(normalize_url("http://localhost:1420/viewer", &dev).is_err());
+        assert!(normalize_url("http://localhost:3000/", &dev).is_ok());
     }
 
     #[test]
-    fn windows_protocol_hosts_are_app_origins() {
-        let url = url::Url::parse("http://tauri.localhost/").unwrap();
-        assert_eq!(is_web_page_url(&url, None), !cfg!(windows));
-    }
-
-    #[test]
-    fn windows_app_hosts_cover_tauri_trust_and_wry_routing() {
-        for host in [
-            "tauri.localhost",
-            "ipc.localhost",
-            "asset.localhost",
-            "future.localhost",
-            "asset.example.com",
+    fn windows_blocks_tauri_trusted_hosts_and_wry_routed_urls() {
+        for raw in [
+            // Tauri trusts `<protocol>.localhost` over http and https.
+            "http://tauri.localhost/",
+            "https://tauri.localhost/",
+            "http://ipc.localhost/x",
+            "http://asset.localhost/x",
+            "https://future.localhost/",
+            // wry serves any URL starting with `http://<protocol>.`.
+            "http://asset.example.com/",
+            "http://tauri.localhost@example.com/",
+            "blob:http://tauri.localhost/1",
         ] {
-            assert!(is_windows_app_host(host), "allowed {host}");
+            let url = url::Url::parse(raw).unwrap();
+            assert!(!is_web_page_url(&url, &WINDOWS), "allowed {raw}");
+            // Elsewhere the protocols have their own schemes; these are web hosts.
+            assert!(is_web_page_url(&url, &ORIGINS), "blocked {raw} off Windows");
         }
-        for host in ["localhost", "example.com", "assets.example.com"] {
-            assert!(!is_windows_app_host(host), "blocked {host}");
+    }
+
+    #[test]
+    fn windows_allows_sites_that_only_look_like_protocol_hosts() {
+        for raw in [
+            "https://tauri.app/start/",
+            "https://ipc.org/",
+            "https://asset.example.com/",
+            "http://assets.example.com/",
+            "http://localhost:3000/",
+            "http://example.com/tauri.localhost",
+        ] {
+            let url = url::Url::parse(raw).unwrap();
+            assert!(is_web_page_url(&url, &WINDOWS), "blocked {raw}");
         }
     }
 
@@ -1869,18 +1924,20 @@ mod normalize_url_tests {
             "blob:null/1",
         ] {
             let url = url::Url::parse(raw).unwrap();
-            assert!(is_web_page_url(&url, None), "rejected {raw}");
+            assert!(is_web_page_url(&url, &ORIGINS), "rejected {raw}");
         }
     }
 
     #[test]
     fn judges_blob_urls_by_their_creator() {
         let url = url::Url::parse("blob:tauri://localhost/1").unwrap();
-        assert!(!is_web_page_url(&url, None));
+        assert!(!is_web_page_url(&url, &ORIGINS));
 
-        let dev = url::Url::parse("http://localhost:1420").unwrap();
         let url = url::Url::parse("blob:http://localhost:1420/1").unwrap();
-        assert!(!is_web_page_url(&url, Some(&dev)));
+        assert!(!is_web_page_url(
+            &url,
+            &with_dev_server("http://localhost:1420")
+        ));
     }
 
     #[test]
@@ -2028,7 +2085,7 @@ pub async fn owned_browser_navigate(
     reveal: Option<bool>,
 ) -> Result<(), String> {
     let state = browser_state();
-    let parsed: url::Url = normalize_url(&url, dev_server_url(&app).as_ref())?;
+    let parsed: url::Url = normalize_url(&url, &app_origins(&app))?;
 
     prepare_navigation(
         &app,
@@ -2062,7 +2119,7 @@ pub async fn owned_browser_tab_navigate(
     owner: Option<String>,
 ) -> Result<(), String> {
     let state = browser_tab_state(&tab_id)?;
-    let parsed = normalize_url(&url, dev_server_url(&app).as_ref())?;
+    let parsed = normalize_url(&url, &app_origins(&app))?;
     prepare_tab_navigation(&app, &state, &tab_id, &parsed, owner.as_deref()).await;
     inject_cookies_for_url_for_state(&app, &parsed, &state).await?;
     if let Some(active) = state.active().await {
