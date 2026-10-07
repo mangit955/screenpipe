@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use tao::{
     event::{Event, StartCause},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
 };
 use wry::{http::Response, WebViewBuilder};
@@ -37,10 +37,15 @@ impl Platform {
 
 const DATA_LITERAL: &str =
     "data:text/html,<script>window.webkit.messageHandlers.ipc.postMessage('x')</script>";
-const DATA_INSTRUMENTED: &str = "data:text/html,<script>var r='typeof_ipc='+typeof(window.webkit.messageHandlers.ipc);try{window.webkit.messageHandlers.ipc.postMessage('x');r+=';postMessage=ok'}catch(e){r+=';postMessage=threw:'+e}document.title='RESULT:'+r</script>";
+const DATA_INSTRUMENTED: &str = "data:text/html,<script>var r='';try{r+='typeof_webkit='+typeof(window.webkit);r+=';typeof_messageHandlers='+typeof(window.webkit&&window.webkit.messageHandlers);r+=';typeof_ipc='+typeof(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.ipc)}catch(e){r+=';probe_threw:'+e}try{window.webkit.messageHandlers.ipc.postMessage('x');r+=';postMessage=ok'}catch(e){r+=';postMessage=threw:'+e}document.title='RESULT:'+r</script>";
 
 const SURROGATE_PAGE: &str = r#"<!doctype html><title>start</title><script>
-var r = 'typeof_ipc=' + typeof (window.webkit.messageHandlers.ipc);
+var r = '';
+try {
+  r += 'typeof_webkit=' + typeof (window.webkit);
+  r += ';typeof_messageHandlers=' + typeof (window.webkit && window.webkit.messageHandlers);
+  r += ';typeof_ipc=' + typeof (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.ipc);
+} catch (e) { r += ';probe_threw:' + e; }
 try { window.webkit.messageHandlers.ipc.postMessage('\uD800'); r += ';postMessage=ok'; }
 catch (e) { r += ';postMessage=threw:' + e; }
 document.title = 'RESULT:' + r;
@@ -179,7 +184,7 @@ fn main() -> wry::Result<()> {
     log!("START scenario={scenario} mode={mode} url={url}");
 
     log!("STEP event_loop_new");
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoopBuilder::<()>::with_user_event().build();
     log!("STEP window_build");
     let window = WindowBuilder::new()
         .with_title("wv-harness")
@@ -247,11 +252,19 @@ fn main() -> wry::Result<()> {
     }
 
     let deadline = Instant::now() + Duration::from_secs(secs);
+    let proxy = event_loop.create_proxy();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(secs));
+        let _ = proxy.send_event(());
+    });
     log!("STEP run");
     event_loop.run(move |event, _, control_flow| {
         let _keep = (&webview, &window);
         *control_flow = ControlFlow::WaitUntil(deadline);
-        if let Event::NewEvents(StartCause::ResumeTimeReached { .. }) = event {
+        let due = matches!(event, Event::UserEvent(()))
+            || matches!(event, Event::NewEvents(StartCause::ResumeTimeReached { .. }))
+            || Instant::now() >= deadline;
+        if due {
             log!("SURVIVED deadline reached, exiting 0");
             *control_flow = ControlFlow::ExitWithCode(0);
         }
