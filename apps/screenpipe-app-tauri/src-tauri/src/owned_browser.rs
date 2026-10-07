@@ -625,7 +625,7 @@ fn webview_url(webview: &Webview<Wry>) -> Option<String> {
 /// whole app on some messages: on macOS it dereferences null for a string with
 /// no UTF-8 form (`postMessage('\uD800')`), on Windows and Linux it unwraps a
 /// URI built from the page URL. On Windows this also applies
-/// [`is_web_page_url`] to iframes.
+/// [`is_web_page_url`] to the navigations `on_navigation` misses.
 fn add_child_webview(
     window: &Window,
     builder: tauri::webview::WebviewBuilder<Wry>,
@@ -649,8 +649,10 @@ fn add_child_webview(
                 if let Ok(settings) = webview.Settings() {
                     let _ = settings.SetIsWebMessageEnabled(false);
                 }
-                // `on_navigation` only sees top-level loads on Windows. WebKit
-                // also sends iframes through it, so filter them here to match.
+                // `on_navigation` misses two kinds of navigation on Windows:
+                // iframes, which WebKit sends through it, and top-level URLs the
+                // `url` crate can't parse, which Tauri allows without asking. wry
+                // still routes those to the app's protocols (`http://tauri.xn--a/`).
                 let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
                     let Some(args) = args else {
                         return Ok(());
@@ -660,9 +662,16 @@ fn add_child_webview(
                     let allowed = args.Uri(&mut uri).is_ok()
                         && url::Url::parse(&take_pwstr(uri))
                             .is_ok_and(|url| is_web_page_url(&url, &origins));
-                    args.SetCancel(!allowed)
+                    // Only ever cancel. wry's `on_navigation` handler was added
+                    // first, so it already ran and set its own decision.
+                    if allowed {
+                        Ok(())
+                    } else {
+                        args.SetCancel(true)
+                    }
                 }));
                 let mut token = 0;
+                let _ = webview.add_NavigationStarting(&handler, &mut token);
                 let _ = webview.add_FrameNavigationStarting(&handler, &mut token);
             }
         }
@@ -1736,6 +1745,9 @@ fn is_windows_app_url(url: &url::Url) -> bool {
     url.host_str()
         .is_some_and(|host| host.ends_with(".localhost"))
         || url.as_str().strip_prefix("http://").is_some_and(|rest| {
+            // Every protocol Tauri registers for this app: `tauri`, `ipc`, and
+            // `asset` (the `protocol-asset` feature). Add any scheme registered
+            // with `register_uri_scheme_protocol` here too.
             ["tauri", "ipc", "asset"].iter().any(|protocol| {
                 rest.strip_prefix(protocol)
                     .is_some_and(|rest| rest.starts_with('.'))
