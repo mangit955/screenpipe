@@ -355,12 +355,18 @@ export function BrowserSidebar({
     return commands.ownedBrowserTabHide(tabId);
   }, []);
 
+  // Numbers each tab's navigations so a late answer can tell whether a newer
+  // navigation has replaced it.
+  const navigationSeqRef = useRef(new Map<string, number>());
   const navigateNativeBrowserTab = useCallback(
-    (tabId: string, url: string, owner: string | null) => {
-      if (tabId === BROWSER_RIGHT_PANEL_TAB_ID) {
-        return commands.ownedBrowserNavigate(url, owner, true);
-      }
-      return commands.ownedBrowserTabNavigate(tabId, url, owner);
+    async (tabId: string, url: string, owner: string | null) => {
+      const seq = (navigationSeqRef.current.get(tabId) ?? 0) + 1;
+      navigationSeqRef.current.set(tabId, seq);
+      const result =
+        tabId === BROWSER_RIGHT_PANEL_TAB_ID
+          ? await commands.ownedBrowserNavigate(url, owner, true)
+          : await commands.ownedBrowserTabNavigate(tabId, url, owner);
+      return { ...result, latest: navigationSeqRef.current.get(tabId) === seq };
     },
     [],
   );
@@ -389,6 +395,32 @@ export function BrowserSidebar({
       });
     },
     [],
+  );
+
+  /** Rust refused a navigation (not a web page, say), so nothing loads. Stop
+   * the spinner, put back the page the tab still `shows`, and say why. */
+  const settleRefusedNavigation = useCallback(
+    (tabId: string, error: string, shows?: LiveBrowserTab) => {
+      updateBrowserTab(
+        tabId,
+        shows
+          ? { url: shows.url, title: shows.title, loading: false }
+          : { loading: false },
+      );
+      if (tabId === activeBrowserTabIdRef.current) {
+        if (shows) {
+          setCurrentUrl(shows.url);
+          setCurrentTitle(shows.title);
+        }
+        setLoading(false);
+      }
+      toast({
+        title: ui("Couldn't open this address"),
+        description: error,
+        variant: "destructive",
+      });
+    },
+    [ui, updateBrowserTab],
   );
 
   const pushBounds = useCallback(async () => {
@@ -1091,11 +1123,14 @@ export function BrowserSidebar({
     try {
       setLoading(true);
       updateBrowserTab(activeBrowserTabId, { loading: true });
-      await navigateNativeBrowserTab(
+      const result = await navigateNativeBrowserTab(
         activeBrowserTabId,
         currentUrl,
         currentOwner ?? conversationId ?? null,
       );
+      if (result.status === "error" && result.latest) {
+        settleRefusedNavigation(activeBrowserTabId, result.error);
+      }
     } catch (e) {
       console.error("reload failed", e);
     }
@@ -1105,6 +1140,7 @@ export function BrowserSidebar({
     currentOwner,
     currentUrl,
     navigateNativeBrowserTab,
+    settleRefusedNavigation,
     updateBrowserTab,
   ]);
 
@@ -1420,19 +1456,14 @@ export function BrowserSidebar({
       const url = addressDraft.trim();
       if (!tabId || !url) return;
       const owner = currentOwner ?? conversationId ?? agentSessionId ?? null;
+      const shows = browserTabsRef.current.find((tab) => tab.id === tabId);
       setCurrentTitle(null);
       setLoading(true);
       updateBrowserTab(tabId, { url, title: null, loading: true, owner });
       void navigateNativeBrowserTab(tabId, url, owner).then((result) => {
-        if (result.status === "ok") return;
-        // Rust refused the address (not a web page, say), so nothing loads.
-        updateBrowserTab(tabId, { loading: false });
-        if (tabId === activeBrowserTabIdRef.current) setLoading(false);
-        toast({
-          title: ui("Couldn't open this address"),
-          description: result.error,
-          variant: "destructive",
-        });
+        if (result.status === "error" && result.latest) {
+          settleRefusedNavigation(tabId, result.error, shows);
+        }
       });
     },
     [
@@ -1441,7 +1472,7 @@ export function BrowserSidebar({
       conversationId,
       currentOwner,
       navigateNativeBrowserTab,
-      ui,
+      settleRefusedNavigation,
       updateBrowserTab,
     ],
   );
