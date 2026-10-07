@@ -61,6 +61,7 @@ import {
 import { ChatPanelHome } from "@/components/chat/chat-panel-home";
 import type { SourceCitation } from "@/lib/source-citations";
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/use-toast";
 import { FilePreviewSidebar } from "@/components/file-preview-sidebar";
 import {
   BROWSER_RIGHT_PANEL_TAB_ID,
@@ -958,18 +959,23 @@ export function BrowserSidebar({
         // "owned-browser not initialized", we swallow it, and the
         // browser silently fails to restore. Retry once when Rust emits
         // `owned-browser:ready` so the saved state survives app quit.
-        const tryNavigate = () =>
-          commands
+        // Rust errors arrive as `{ status: "error" }`, not as rejections.
+        const tryNavigate = async () => {
+          const result = await commands
             .ownedBrowserNavigate(url, conversationId, false)
-            .catch((e) => {
-              const msg = typeof e === "string" ? e : String(e);
-              return msg.includes("not initialized") ? "retry" : null;
-            });
+            .catch(() => null);
+          if (result?.status !== "error") return null;
+          return result.error.includes("not initialized") ? "retry" : "refused";
+        };
         const first = await tryNavigate();
         if (!cancelled && first === "retry") {
           unlistenReady = await listen("owned-browser:ready", () => {
             tryNavigate();
           });
+        } else if (!cancelled && first === "refused") {
+          // A saved URL Rust no longer loads; stop the spinner.
+          setLoading(false);
+          updateBrowserTab(BROWSER_RIGHT_PANEL_TAB_ID, { loading: false });
         }
         // If collapsed, hide the webview right away — pushBounds wouldn't
         // run because the placeholder isn't mounted.
@@ -1434,7 +1440,17 @@ export function BrowserSidebar({
       setCurrentTitle(null);
       setLoading(true);
       updateBrowserTab(tabId, { url, title: null, loading: true, owner });
-      void navigateNativeBrowserTab(tabId, url, owner);
+      void navigateNativeBrowserTab(tabId, url, owner).then((result) => {
+        if (result.status === "ok") return;
+        // Rust refused the address (not a web page, say), so nothing loads.
+        updateBrowserTab(tabId, { loading: false });
+        if (tabId === activeBrowserTabIdRef.current) setLoading(false);
+        toast({
+          title: ui("Couldn't open this address"),
+          description: result.error,
+          variant: "destructive",
+        });
+      });
     },
     [
       addressDraft,
@@ -1442,6 +1458,7 @@ export function BrowserSidebar({
       conversationId,
       currentOwner,
       navigateNativeBrowserTab,
+      ui,
       updateBrowserTab,
     ],
   );

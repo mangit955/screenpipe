@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   ownedBrowserTabHide: vi.fn(),
   ownedBrowserNavigate: vi.fn(),
   ownedBrowserSetBounds: vi.fn(),
+  toast: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -92,6 +93,10 @@ vi.mock("@/lib/api", () => ({
   localFetch: vi.fn(),
 }));
 
+vi.mock("@/components/ui/use-toast", () => ({
+  toast: mocks.toast,
+}));
+
 vi.mock("@/components/file-preview-sidebar", () => ({
   FilePreviewSidebar: () => null,
 }));
@@ -146,6 +151,7 @@ describe("BrowserSidebar session access", () => {
     mocks.ownedBrowserTabHide.mockReset().mockResolvedValue(undefined);
     mocks.ownedBrowserNavigate.mockReset().mockResolvedValue(undefined);
     mocks.ownedBrowserSetBounds.mockReset().mockResolvedValue(undefined);
+    mocks.toast.mockReset();
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
       x: 0,
@@ -319,5 +325,50 @@ describe("BrowserSidebar session access", () => {
     await act(async () => {});
 
     expect(mocks.ownedBrowserNavigate).toHaveBeenCalledTimes(1);
+  });
+
+  const refused = {
+    status: "error",
+    error:
+      "the owned browser cannot load file:///etc/hosts: only web pages outside the app's own origins",
+  };
+
+  it("stops loading and says why when Rust refuses a typed address", async () => {
+    render(<BrowserSidebar conversationId="chat-1" />);
+    // Let the empty restore finish first; it closes the panel when it lands.
+    await act(async () => {});
+    act(() => {
+      emit("owned-browser:navigate", {
+        url: "https://example.com/", owner: "chat-1", navigationId: "nav-1", reveal: true,
+      });
+    });
+    mocks.ownedBrowserNavigate.mockResolvedValue(refused);
+
+    const address = screen.getByLabelText("Browser address");
+    fireEvent.change(address, { target: { value: "file:///etc/hosts" } });
+    fireEvent.submit(address.closest("form")!);
+
+    await waitFor(() =>
+      expect(mocks.toast).toHaveBeenCalledWith(
+        expect.objectContaining({ description: refused.error, variant: "destructive" }),
+      ),
+    );
+    expect(mocks.ownedBrowserNavigate).toHaveBeenLastCalledWith("file:///etc/hosts", "chat-1", true);
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("tab-loading-browser")).toHaveTextContent("false");
+  });
+
+  it("stops loading when Rust refuses a restored URL", async () => {
+    mocks.loadConversationFile.mockResolvedValue({
+      browserState: { url: "file:///etc/hosts", updatedAt: 1, collapsed: false },
+    });
+    mocks.ownedBrowserNavigate.mockResolvedValue(refused);
+    render(<BrowserSidebar conversationId="chat-1" />);
+
+    await waitFor(() => expect(mocks.ownedBrowserNavigate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByTestId("tab-loading-browser")).toHaveTextContent("false"),
+    );
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 });
