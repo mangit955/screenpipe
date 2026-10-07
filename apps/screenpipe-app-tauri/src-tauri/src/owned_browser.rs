@@ -1749,6 +1749,18 @@ fn normalize_url(raw: &str, dev_server: Option<&url::Url>) -> Result<url::Url, S
             "the owned browser cannot load {url}: only web pages outside the app's own origins"
         ));
     }
+    // wry unwraps `NSURL::URLWithString` when it loads a URL. Before macOS 14
+    // that parser rejects characters `url` leaves raw (`{ } | ^`, a stray `%`),
+    // so refuse here instead of aborting the app.
+    #[cfg(target_os = "macos")]
+    if objc2::rc::autoreleasepool(|_| {
+        objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(url.as_str()))
+            .is_none()
+    }) {
+        return Err(format!(
+            "this macOS version cannot load {url}; percent-encode its special characters"
+        ));
+    }
     Ok(url)
 }
 
