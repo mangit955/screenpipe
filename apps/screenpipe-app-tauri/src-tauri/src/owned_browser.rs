@@ -611,6 +611,46 @@ fn webview_url(webview: &Webview<Wry>) -> Option<String> {
     webview.url().ok().map(|url| url.to_string())
 }
 
+/// Attach an owned-browser child to `window` without the `ipc` message channel
+/// wry gives every webview. Pages here never call Tauri IPC, and wry crashes the
+/// whole app on some messages: on macOS it dereferences null for a string with
+/// no UTF-8 form (`postMessage('\uD800')`), on Windows and Linux it unwraps a
+/// URI built from the page URL.
+fn add_child_webview(
+    window: &Window,
+    builder: tauri::webview::WebviewBuilder<Wry>,
+    position: impl Into<Position>,
+    size: impl Into<Size>,
+) -> tauri::Result<Webview<Wry>> {
+    let child = window.add_child(builder, position, size)?;
+    child.with_webview(|platform| {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let controller = platform.controller().cast::<objc2::runtime::AnyObject>();
+            let name = objc2_foundation::NSString::from_str("ipc");
+            let _: () = objc2::msg_send![controller, removeScriptMessageHandlerForName: &*name];
+        }
+        #[cfg(windows)]
+        unsafe {
+            if let Ok(settings) = platform
+                .controller()
+                .CoreWebView2()
+                .and_then(|webview| webview.Settings())
+            {
+                let _ = settings.SetIsWebMessageEnabled(false);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use webkit2gtk::{UserContentManagerExt, WebViewExt};
+            if let Some(manager) = platform.inner().user_content_manager() {
+                manager.unregister_script_message_handler("ipc");
+            }
+        }
+    })?;
+    Ok(child)
+}
+
 fn child_webview_builder(
     app: &AppHandle,
     label: &str,
@@ -1273,13 +1313,13 @@ async fn ensure_child_bounds(
                 state.clone(),
                 None,
             );
-            let child = parent_window
-                .add_child(
-                    builder,
-                    LogicalPosition::new(x, y),
-                    LogicalSize::new(width, height),
-                )
-                .map_err(|e| format!("owned-browser child webview attach failed: {e}"))?;
+            let child = add_child_webview(
+                &parent_window,
+                builder,
+                LogicalPosition::new(x, y),
+                LogicalSize::new(width, height),
+            )
+            .map_err(|e| format!("owned-browser child webview attach failed: {e}"))?;
             let pending_url = inner.pending_url.take();
             inner.child = Some(child.clone());
             inner.child_parent = Some(parent.to_string());
@@ -1341,13 +1381,13 @@ async fn ensure_tab_child_bounds(
                 state.clone(),
                 Some(tab_id.to_string()),
             );
-            let child = parent_window
-                .add_child(
-                    builder,
-                    LogicalPosition::new(x, y),
-                    LogicalSize::new(width, height),
-                )
-                .map_err(|e| format!("browser tab child webview attach failed: {e}"))?;
+            let child = add_child_webview(
+                &parent_window,
+                builder,
+                LogicalPosition::new(x, y),
+                LogicalSize::new(width, height),
+            )
+            .map_err(|e| format!("browser tab child webview attach failed: {e}"))?;
             let pending_url = inner.pending_url.take();
             inner.child = Some(child.clone());
             inner.child_parent = Some(parent.to_string());
@@ -1509,13 +1549,13 @@ async fn ensure_background_child(
         state.clone(),
         None,
     );
-    let child = host
-        .add_child(
-            builder,
-            LogicalPosition::new(0.0, 0.0),
-            LogicalSize::new(BG_HOST_SIZE, BG_HOST_SIZE),
-        )
-        .map_err(|e| format!("owned-browser background child attach failed: {e}"))?;
+    let child = add_child_webview(
+        &host,
+        builder,
+        LogicalPosition::new(0.0, 0.0),
+        LogicalSize::new(BG_HOST_SIZE, BG_HOST_SIZE),
+    )
+    .map_err(|e| format!("owned-browser background child attach failed: {e}"))?;
     child
         .show()
         .map_err(|e| format!("owned-browser background child show failed: {e}"))?;
