@@ -700,7 +700,6 @@ async fn show_native_for_background_eval(active: &Webview<Wry>, state: &OwnedBro
 }
 
 const EVAL_RESULT_INLINE_MAX_CHARS: usize = 800;
-const EVAL_RESULT_CHUNK_SIZE: usize = 700;
 
 fn build_eval_result_script(code: &str, id: &str) -> String {
     let id_lit = serde_json::to_string(id).unwrap();
@@ -775,7 +774,7 @@ fn build_eval_result_script(code: &str, id: &str) -> String {
         id = id_lit,
         prefix = prefix_lit,
         inline_max = EVAL_RESULT_INLINE_MAX_CHARS,
-        chunk_size = EVAL_RESULT_CHUNK_SIZE,
+        chunk_size = transport::CHUNK_SIZE,
     )
 }
 
@@ -936,6 +935,7 @@ impl TauriOwnedHandle {
                 "owned-browser eval: got chunk {seq} before a header"
             )),
             transport::Marker::Header { chunks, .. } => {
+                transport::check_chunk_count(chunks)?;
                 let mut parts: Vec<String> = Vec::with_capacity(chunks);
                 for i in 0..chunks {
                     self.state.record_title(String::new());
