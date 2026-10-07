@@ -2829,17 +2829,16 @@ async fn inject_cookies_macos(
                     let s: id = NSString::alloc(nil).init_str("TRUE");
                     push("Discard", s, &mut keys, &mut vals);
                 }
-                // Chromium same_site mapping. -1 = unspecified, omit.
-                let same_site_str = match c.same_site {
-                    0 => Some("None"),
-                    1 => Some("Lax"),
-                    2 => Some("Strict"),
-                    _ => None,
+                // Chromium same_site mapping. Chrome treats -1 (unspecified)
+                // as Lax; WebKit would treat a missing attribute as None and
+                // send the cookie on cross-site requests from any page here.
+                let same_site = match c.same_site {
+                    0 => "None",
+                    2 => "Strict",
+                    _ => "Lax",
                 };
-                if let Some(ss) = same_site_str {
-                    let v: id = NSString::alloc(nil).init_str(ss);
-                    push("SameSite", v, &mut keys, &mut vals);
-                }
+                let v: id = NSString::alloc(nil).init_str(same_site);
+                push("SameSite", v, &mut keys, &mut vals);
                 // NSHTTPCookieVersion = 0 → classic Netscape semantics.
                 let zero: id = NSString::alloc(nil).init_str("0");
                 push("Version", zero, &mut keys, &mut vals);
