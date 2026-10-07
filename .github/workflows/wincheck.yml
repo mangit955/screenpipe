@@ -25,7 +25,7 @@ jobs:
         run: cargo build --locked
       - name: Run scenarios
         shell: pwsh
-        run: ./run.ps1 -Exe target\debug\wincheck.exe -Out out -Runs 's9 filter,s9 filter,s9 filter,s9 control,s9late control,s9late filter,s9late late'
+        run: ./run.ps1 -Exe target\debug\wincheck.exe -Out out -Only 's9 filter,s9 filter,s9 filter,s9 control,s9late control,s9late filter,s9late late'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
