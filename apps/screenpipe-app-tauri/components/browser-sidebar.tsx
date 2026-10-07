@@ -914,7 +914,6 @@ export function BrowserSidebar({
         cancelled = true;
       };
     }
-    let unlistenReady: (() => void) | null = null;
     (async () => {
       const conv = await loadConversationFile(conversationId).catch(() => null);
       // An explicit panel action wins over a slower disk restore.
@@ -952,28 +951,13 @@ export function BrowserSidebar({
         setCurrentNavigationId(null);
         setCurrentTitle(null);
         setLoading(!wasCollapsed);
-        // The webview install runs on a background task that retries
-        // until the app's Tauri runtime has booted. On cold start a chat
-        // with a saved `browserState.url` opens fast enough that this
-        // navigate() lands before install finishes — Rust returns
-        // "owned-browser not initialized", we swallow it, and the
-        // browser silently fails to restore. Retry once when Rust emits
-        // `owned-browser:ready` so the saved state survives app quit.
-        // Rust errors arrive as `{ status: "error" }`, not as rejections.
-        const tryNavigate = async () => {
-          const result = await commands
-            .ownedBrowserNavigate(url, conversationId, false)
-            .catch(() => null);
-          if (result?.status !== "error") return null;
-          return result.error.includes("not initialized") ? "retry" : "refused";
-        };
-        const first = await tryNavigate();
-        if (!cancelled && first === "retry") {
-          unlistenReady = await listen("owned-browser:ready", () => {
-            tryNavigate();
-          });
-        } else if (!cancelled && first === "refused") {
-          // A saved URL Rust no longer loads; stop the spinner.
+        // Before the native child exists Rust keeps the URL for it, so an
+        // error means Rust refused the saved URL. Errors arrive as
+        // `{ status: "error" }`, not as rejections.
+        const result = await commands
+          .ownedBrowserNavigate(url, conversationId, false)
+          .catch(() => null);
+        if (!cancelled && result?.status === "error") {
           setLoading(false);
           updateBrowserTab(BROWSER_RIGHT_PANEL_TAB_ID, { loading: false });
         }
@@ -997,7 +981,6 @@ export function BrowserSidebar({
     })();
     return () => {
       cancelled = true;
-      if (unlistenReady) unlistenReady();
     };
   }, [conversationId, hideNativeBrowserTab, updateBrowserTab]);
 

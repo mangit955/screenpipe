@@ -70,12 +70,6 @@ const NAVIGATE_EVENT: &str = "owned-browser:navigate";
 ///   never from `on_navigation` (subframes can fire that on macOS).
 const STATE_EVENT: &str = "owned-browser:state";
 
-/// Emitted to the frontend exactly once when `spawn_install_when_ready`
-/// attaches the handle to the registry. Lets `BrowserSidebar` retry a
-/// per-conversation `owned_browser_navigate` that lost the install race on
-/// cold start.
-const READY_EVENT: &str = "owned-browser:ready";
-
 /// Emitted when the owned browser is about to copy cookies from the
 /// user's real browser. The sidebar answers through the
 /// `owned_browser_resolve_session_access` command.
@@ -1278,14 +1272,6 @@ pub fn spawn_install_when_ready(
                 Ok(handle) => {
                     owned_browser.attach(handle).await;
                     info!("owned-browser ready");
-                    // Notify the frontend so any sidebar that tried to call
-                    // `owned_browser_navigate` before install finished can
-                    // retry. Without this, opening a chat with a saved
-                    // `browserState.url` during the install race silently
-                    // dropped the navigate (Rust returns "not initialized",
-                    // frontend swallows in `.catch(() => {})`) and the
-                    // browser never restored on next app launch.
-                    let _ = app.emit(READY_EVENT, ());
                     return;
                 }
                 Err(e) => {
