@@ -187,6 +187,29 @@ fn pending_session_access(
     SESSION_ACCESS_PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Ownership of [`SESSION_ACCESS_PROMPT_IN_FLIGHT`] for one prompt. Dropping it
+/// frees the prompt slot and forgets the request on every exit, including when
+/// an HTTP client gives up and its request future is dropped mid-wait.
+struct SessionPromptGuard {
+    request_id: String,
+}
+
+impl Drop for SessionPromptGuard {
+    fn drop(&mut self) {
+        let request_id = std::mem::take(&mut self.request_id);
+        // Remove before freeing the slot: `owned_browser_set_bounds` hides the
+        // browser while any request is pending.
+        if let Ok(mut pending) = pending_session_access().try_lock() {
+            pending.remove(&request_id);
+        } else {
+            tauri::async_runtime::spawn(async move {
+                pending_session_access().lock().await.remove(&request_id);
+            });
+        }
+        SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Normalize host keys so `www.example.com` and `example.com` share one decision.
 fn session_host_key(host: &str) -> String {
     let lower = host.to_ascii_lowercase();
@@ -1615,10 +1638,13 @@ fn normalize_url(raw: &str) -> Result<url::Url, String> {
 mod normalize_url_tests {
     use super::{
         browser_tab_state, build_eval_result_script, existing_browser_tab_state, normalize_url,
-        session_host_key, session_prompt_in_flight_timeout_error, session_prompt_timeout_error,
-        OwnedBrowserState,
+        pending_session_access, session_host_key, session_prompt_in_flight_timeout_error,
+        session_prompt_timeout_error, OwnedBrowserState, SessionPromptGuard,
+        SESSION_ACCESS_PROMPT_IN_FLIGHT,
     };
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn keeps_fully_qualified() {
@@ -1702,6 +1728,33 @@ mod normalize_url_tests {
         let in_flight = session_prompt_in_flight_timeout_error("linkedin.com");
         assert!(in_flight.contains("existing browser-session permission prompt"));
         assert!(in_flight.contains("retry from the owned browser menu"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_session_prompt_frees_the_prompt_slot() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        pending_session_access()
+            .lock()
+            .await
+            .insert("cancelled-prompt".into(), tx);
+        SESSION_ACCESS_PROMPT_IN_FLIGHT.store(true, Ordering::SeqCst);
+
+        // An HTTP client that gives up drops the request future mid-wait.
+        let waiting = async {
+            let _prompt = SessionPromptGuard {
+                request_id: "cancelled-prompt".into(),
+            };
+            std::future::pending::<()>().await;
+        };
+        assert!(tokio::time::timeout(Duration::from_millis(10), waiting)
+            .await
+            .is_err());
+
+        assert!(!SESSION_ACCESS_PROMPT_IN_FLIGHT.load(Ordering::SeqCst));
+        assert!(!pending_session_access()
+            .lock()
+            .await
+            .contains_key("cancelled-prompt"));
     }
 
     #[test]
@@ -2429,12 +2482,16 @@ async fn browser_session_decision_for_url(
         }
     }
 
+    let request_id = Uuid::new_v4().to_string();
+    let _prompt = SessionPromptGuard {
+        request_id: request_id.clone(),
+    };
+
     if let Some(active) = state.active().await {
         let _ = active.hide();
         state.set_visible(false).await;
     }
 
-    let request_id = Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
     pending_session_access()
         .lock()
@@ -2452,8 +2509,6 @@ async fn browser_session_decision_for_url(
     };
 
     if let Err(e) = app.emit(SESSION_ACCESS_REQUEST_EVENT, payload) {
-        pending_session_access().lock().await.remove(&request_id);
-        SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
         warn!("owned-browser session access: failed to emit request: {e}");
         return BrowserSessionDecision::CancelNavigation(session_prompt_emit_error(&host_key, e));
     }
@@ -2464,7 +2519,6 @@ async fn browser_session_decision_for_url(
             BrowserSessionDecision::CancelNavigation(session_prompt_timeout_error(&host_key))
         }
         Err(_) => {
-            pending_session_access().lock().await.remove(&request_id);
             warn!(
                 host = host_key.as_str(),
                 "owned-browser session access: user prompt timed out"
@@ -2473,7 +2527,6 @@ async fn browser_session_decision_for_url(
         }
     };
 
-    SESSION_ACCESS_PROMPT_IN_FLIGHT.store(false, Ordering::SeqCst);
     match &decision {
         BrowserSessionDecision::UseBrowserSession => {
             // Set the global runtime flag — frontend is responsible for
