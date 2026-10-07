@@ -156,11 +156,13 @@ pub fn chunk_fetch_js(seq: usize) -> String {
 }
 
 /// Title to restore after reading a result, preserving any `document.title` the
-/// caller's own eval code set (reported back as the payload's `title`).
+/// caller's own eval code set (reported back as the payload's `title`). A
+/// marker an earlier failed eval left in `document.title` is not a page title.
 pub fn title_after_eval_marker(original_title: &str, payload: &EvalPayload) -> String {
     payload
         .title
         .clone()
+        .filter(|title| !title.starts_with(RESULT_TITLE_PREFIX))
         .unwrap_or_else(|| original_title.to_string())
 }
 
@@ -365,6 +367,21 @@ mod tests {
             result: None,
             error: None,
             title: None,
+        };
+        assert_eq!(
+            title_after_eval_marker("Example Domain", &p),
+            "Example Domain"
+        );
+    }
+
+    #[test]
+    fn does_not_restore_a_stale_marker_as_the_title() {
+        let p = EvalPayload {
+            id: "2".into(),
+            ok: true,
+            result: None,
+            error: None,
+            title: Some(format!(r#"{RESULT_TITLE_PREFIX}{{"id":"1","chunks":3}}"#)),
         };
         assert_eq!(
             title_after_eval_marker("Example Domain", &p),

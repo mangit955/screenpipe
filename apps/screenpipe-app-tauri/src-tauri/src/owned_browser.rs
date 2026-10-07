@@ -310,6 +310,10 @@ struct NavigationContext {
 struct OwnedBrowserState {
     inner: Mutex<OwnedBrowserInner>,
     last_title: StdMutex<String>,
+    /// Latest eval result marker, kept apart from `last_title` so a page that
+    /// retitles itself (unread counts, tickers) cannot overwrite a marker
+    /// before the eval reader polls it.
+    last_marker: StdMutex<String>,
     recent_navigations: StdMutex<Vec<NavigationContext>>,
     pending_navigation_id: StdMutex<Option<String>>,
     /// Owner (chat/session id) of the most recent navigation. Set by
@@ -328,6 +332,7 @@ impl OwnedBrowserState {
         Self {
             inner: Mutex::new(OwnedBrowserInner::default()),
             last_title: StdMutex::new(String::new()),
+            last_marker: StdMutex::new(String::new()),
             recent_navigations: StdMutex::new(Vec::new()),
             pending_navigation_id: StdMutex::new(None),
             pending_owner: StdMutex::new(None),
@@ -427,10 +432,31 @@ impl OwnedBrowserState {
         }
     }
 
+    fn record_marker(&self, marker: String) {
+        if let Ok(mut last_marker) = self.last_marker.lock() {
+            *last_marker = marker;
+        }
+    }
+
     fn latest_title(&self) -> String {
         self.last_title
             .lock()
             .map(|title| title.clone())
+            .unwrap_or_default()
+    }
+
+    fn clear_marker(&self) {
+        if let Ok(mut last_marker) = self.last_marker.lock() {
+            last_marker.clear();
+        }
+    }
+
+    /// Take the latest result marker, leaving the slot empty. Reading and
+    /// clearing in one step keeps a marker that lands right after the read.
+    fn take_marker(&self) -> String {
+        self.last_marker
+            .lock()
+            .map(|mut marker| std::mem::take(&mut *marker))
             .unwrap_or_default()
     }
 
@@ -621,10 +647,11 @@ fn child_webview_builder(
             );
         })
         .on_document_title_changed(move |webview, title| {
-            state_for_title.record_title(title.clone());
             if title.starts_with(transport::RESULT_TITLE_PREFIX) {
+                state_for_title.record_marker(title);
                 return;
             }
+            state_for_title.record_title(title.clone());
             let committed_url = webview_url(&webview);
             emit_state_event_for(
                 &app_for_title,
@@ -863,6 +890,8 @@ impl TauriOwnedHandle {
         let id = Uuid::new_v4().to_string();
         let wrapped = build_eval_result_script(code, &id);
 
+        // Drop any marker a timed-out eval left behind.
+        self.state.clear_marker();
         active
             .eval(wrapped)
             .map_err(|e| format!("webview.eval failed: {e}"))?;
@@ -938,7 +967,6 @@ impl TauriOwnedHandle {
                 transport::check_chunk_count(chunks)?;
                 let mut parts: Vec<String> = Vec::with_capacity(chunks);
                 for i in 0..chunks {
-                    self.state.record_title(String::new());
                     active
                         .eval(transport::chunk_fetch_js(i))
                         .map_err(|e| format!("owned-browser fetch chunk {i}: {e}"))?;
@@ -974,13 +1002,17 @@ impl TauriOwnedHandle {
     ) -> Result<transport::Marker, String> {
         loop {
             if start.elapsed() >= timeout {
+                let waiting_for = match want_seq {
+                    Some(seq) => format!("chunk {seq}"),
+                    None => "the result".to_string(),
+                };
                 return Err(format!(
-                    "owned-browser eval timed out after {}s (last title: {:?})",
+                    "owned-browser eval timed out after {}s waiting for {waiting_for} (last title: {:?})",
                     timeout.as_secs(),
                     self.state.latest_title()
                 ));
             }
-            let title = self.state.latest_title();
+            let title = self.state.take_marker();
             if let Some(rest) = title.strip_prefix(transport::RESULT_TITLE_PREFIX) {
                 let marker = transport::parse_marker(rest)?;
                 let marker_id = match &marker {
@@ -993,7 +1025,6 @@ impl TauriOwnedHandle {
                         "owned-browser eval ignored stale result id (got {}, expected {})",
                         marker_id, expected_id
                     );
-                    self.state.record_title(String::new());
                     continue;
                 }
                 match want_seq {
@@ -1003,7 +1034,6 @@ impl TauriOwnedHandle {
                         if matches!(&marker, transport::Marker::Chunk { seq, .. } if *seq == want) {
                             return Ok(marker);
                         }
-                        self.state.record_title(String::new());
                     }
                     // First-marker wait (inline result or chunk header).
                     None => match marker {
@@ -1682,6 +1712,21 @@ mod normalize_url_tests {
         assert!(script.contains("\"eval-id-1\""));
         assert!(script.contains("window.__SP_OB_CHUNK__"));
         assert!(script.contains("id: window.__SP_OB_ID__ || \"\""));
+    }
+
+    #[test]
+    fn page_retitle_does_not_overwrite_a_pending_result_marker() {
+        let state = OwnedBrowserState::new();
+        let marker = format!(
+            r#"{}{{"id":"1","ok":true}}"#,
+            super::transport::RESULT_TITLE_PREFIX
+        );
+        state.record_marker(marker.clone());
+        state.record_title("(3) Inbox".into());
+        assert_eq!(state.take_marker(), marker);
+        assert_eq!(state.latest_title(), "(3) Inbox");
+        // A read leaves nothing for the next eval to skip as stale.
+        assert_eq!(state.take_marker(), "");
     }
 
     // The `document.title` result-transport logic (inline + chunked) and the
