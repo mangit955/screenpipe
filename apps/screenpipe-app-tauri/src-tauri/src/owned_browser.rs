@@ -615,7 +615,8 @@ fn webview_url(webview: &Webview<Wry>) -> Option<String> {
 /// wry gives every webview. Pages here never call Tauri IPC, and wry crashes the
 /// whole app on some messages: on macOS it dereferences null for a string with
 /// no UTF-8 form (`postMessage('\uD800')`), on Windows and Linux it unwraps a
-/// URI built from the page URL.
+/// URI built from the page URL. On Windows this also applies
+/// [`is_web_page_url`] to iframes.
 fn add_child_webview(
     window: &Window,
     builder: tauri::webview::WebviewBuilder<Wry>,
@@ -623,7 +624,9 @@ fn add_child_webview(
     size: impl Into<Size>,
 ) -> tauri::Result<Webview<Wry>> {
     let child = window.add_child(builder, position, size)?;
-    child.with_webview(|platform| {
+    #[cfg(windows)]
+    let dev_server = dev_server_url(window.app_handle());
+    child.with_webview(move |platform| {
         #[cfg(target_os = "macos")]
         unsafe {
             let controller = platform.controller().cast::<objc2::runtime::AnyObject>();
@@ -632,12 +635,25 @@ fn add_child_webview(
         }
         #[cfg(windows)]
         unsafe {
-            if let Ok(settings) = platform
-                .controller()
-                .CoreWebView2()
-                .and_then(|webview| webview.Settings())
-            {
-                let _ = settings.SetIsWebMessageEnabled(false);
+            use webview2_com::{take_pwstr, NavigationStartingEventHandler};
+            if let Ok(webview) = platform.controller().CoreWebView2() {
+                if let Ok(settings) = webview.Settings() {
+                    let _ = settings.SetIsWebMessageEnabled(false);
+                }
+                // `on_navigation` only sees top-level loads on Windows. WebKit
+                // also sends iframes through it, so filter them here to match.
+                let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                    if let Some(args) = args {
+                        let mut uri = windows_core::PWSTR::null();
+                        args.Uri(&mut uri)?;
+                        let allowed = url::Url::parse(&take_pwstr(uri))
+                            .is_ok_and(|url| is_web_page_url(&url, dev_server.as_ref()));
+                        args.SetCancel(!allowed)?;
+                    }
+                    Ok(())
+                }));
+                let mut token = 0;
+                let _ = webview.add_FrameNavigationStarting(&handler, &mut token);
             }
         }
         #[cfg(target_os = "linux")]
@@ -667,10 +683,22 @@ fn child_webview_builder(
     let tab_for_title = tab_id.clone();
     let tab_for_nav = tab_id.clone();
     let tab_for_page_load = tab_id;
+    let dev_server = dev_server_url(app);
     let builder = tauri::webview::WebviewBuilder::new(label.to_string(), url)
         .initialization_script(transport::BRIDGE_INIT_SCRIPT)
         .background_throttling(BackgroundThrottlingPolicy::Disabled)
-        .on_navigation(move |_url| {
+        .on_navigation(move |url| {
+            // Pages navigate and redirect without going through normalize_url.
+            if !is_web_page_url(url, dev_server.as_ref()) {
+                // Not `warn!`: a page can retry this in a tight loop, and warnings
+                // reach the log file and Sentry.
+                debug!(
+                    "owned-browser blocked navigation to {}://{}",
+                    url.scheme(),
+                    url.host_str().unwrap_or_default()
+                );
+                return false;
+            }
             // Browsers do not put subframe navigations in the omnibox. Wry's
             // `on_navigation` URL can be an iframe target on macOS (wry#1593),
             // so never copy it into the sidebar — only reflect load activity.
@@ -885,7 +913,7 @@ impl TauriOwnedHandle {
         let _guard = self.eval_lock.lock().await;
 
         let target_url = if let Some(target) = url {
-            Some(normalize_url(&target)?)
+            Some(normalize_url(&target, dev_server_url(&self.app).as_ref())?)
         } else {
             None
         };
@@ -1154,7 +1182,7 @@ impl OwnedWebviewHandle for TauriOwnedHandle {
     /// own titles. The frontend sidebar listens for `NAVIGATE_EVENT` and
     /// reveals/positions the webview itself.
     async fn navigate(&self, url: &str, owner: Option<&str>) -> Result<(), String> {
-        let parsed: url::Url = normalize_url(url)?;
+        let parsed: url::Url = normalize_url(url, dev_server_url(&self.app).as_ref())?;
 
         // Push the user's real-browser cookies for this host into
         // WKHTTPCookieStore before issuing the navigate, so the request
@@ -1642,13 +1670,57 @@ pub async fn owned_browser_tab_set_bounds(
     Ok(())
 }
 
-/// Normalise a user-supplied URL string into a full `url::Url`.
+/// The dev server, which Tauri treats as the app's own origin in dev builds.
+fn dev_server_url(app: &AppHandle) -> Option<url::Url> {
+    if tauri::is_dev() {
+        app.config().build.dev_url.clone()
+    } else {
+        None
+    }
+}
+
+/// Whether the owned browser may load `url`. Tauri grants IPC to the app's own
+/// origins: its custom protocols (`tauri:`, `ipc:`, `asset:`; see
+/// [`is_windows_app_host`] for Windows) and the dev server. A page that reached
+/// one would run with the app's capabilities, so only web URLs outside those
+/// origins pass. Iframes need `about:`, `data:` and `blob:`; a `blob:` URL
+/// carries the origin of the page that created it.
+fn is_web_page_url(url: &url::Url, dev_server: Option<&url::Url>) -> bool {
+    match url.scheme() {
+        "http" | "https" => {
+            let app_host = cfg!(windows) && url.host_str().is_some_and(is_windows_app_host);
+            !app_host && dev_server.is_none_or(|dev| dev.origin() != url.origin())
+        }
+        "about" | "data" => true,
+        "blob" => match url::Url::parse(url.path()) {
+            Ok(creator) => {
+                matches!(creator.scheme(), "http" | "https")
+                    && is_web_page_url(&creator, dev_server)
+            }
+            // Opaque creator such as a sandboxed frame: `blob:null/<id>`.
+            Err(_) => true,
+        },
+        _ => false,
+    }
+}
+
+/// Whether `host` serves the app's custom protocols on Windows, where they run
+/// over http(s). Tauri trusts `<protocol>.localhost`; every `.localhost` host
+/// is blocked so a protocol added later is covered too. wry also routes
+/// `<protocol>.<any host>` to the protocol, which would serve app files there.
+fn is_windows_app_host(host: &str) -> bool {
+    host.ends_with(".localhost")
+        || matches!(host.split('.').next(), Some("tauri" | "ipc" | "asset"))
+}
+
+/// Normalise a user-supplied URL string into a full `url::Url` the owned
+/// browser may load (see [`is_web_page_url`]).
 ///
 /// Accepts bare hosts (`youtube.com`), `//`-prefixed (`//youtube.com`),
 /// fully-qualified URLs (`https://youtube.com`), and hostless schemes
-/// (`about:blank`, `data:...`, `file:...`).  Anything that looks like it
+/// (`about:blank`, `data:...`).  Anything that looks like it
 /// is missing a scheme gets `https://` prepended before parsing.
-fn normalize_url(raw: &str) -> Result<url::Url, String> {
+fn normalize_url(raw: &str, dev_server: Option<&url::Url>) -> Result<url::Url, String> {
     // Hostless schemes that don't use `://`. Keep this conservative so that
     // `localhost:8080` (host:port, not a scheme) still gets `https://` prepended.
     const HOSTLESS_SCHEMES: &[&str] = &[
@@ -1669,18 +1741,24 @@ fn normalize_url(raw: &str) -> Result<url::Url, String> {
     } else {
         format!("https://{raw}")
     };
-    candidate
+    let url = candidate
         .parse::<url::Url>()
-        .map_err(|e| format!("invalid url: {e}"))
+        .map_err(|e| format!("invalid url: {e}"))?;
+    if !is_web_page_url(&url, dev_server) {
+        return Err(format!(
+            "the owned browser cannot load {url}: only web pages outside the app's own origins"
+        ));
+    }
+    Ok(url)
 }
 
 #[cfg(test)]
 mod normalize_url_tests {
     use super::{
-        browser_tab_state, build_eval_result_script, existing_browser_tab_state, normalize_url,
-        pending_session_access, session_host_key, session_prompt_in_flight_timeout_error,
-        session_prompt_timeout_error, OwnedBrowserState, SessionPromptGuard,
-        SESSION_ACCESS_PROMPT_IN_FLIGHT,
+        browser_tab_state, build_eval_result_script, existing_browser_tab_state, is_web_page_url,
+        is_windows_app_host, normalize_url, pending_session_access, session_host_key,
+        session_prompt_in_flight_timeout_error, session_prompt_timeout_error, OwnedBrowserState,
+        SessionPromptGuard, SESSION_ACCESS_PROMPT_IN_FLIGHT,
     };
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -1688,28 +1766,28 @@ mod normalize_url_tests {
 
     #[test]
     fn keeps_fully_qualified() {
-        let u = normalize_url("https://youtube.com").unwrap();
+        let u = normalize_url("https://youtube.com", None).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("youtube.com"));
     }
 
     #[test]
     fn adds_https_to_bare_host() {
-        let u = normalize_url("youtube.com").unwrap();
+        let u = normalize_url("youtube.com", None).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("youtube.com"));
     }
 
     #[test]
     fn adds_https_to_protocol_relative() {
-        let u = normalize_url("//youtube.com").unwrap();
+        let u = normalize_url("//youtube.com", None).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("youtube.com"));
     }
 
     #[test]
     fn adds_https_to_host_port() {
-        let u = normalize_url("localhost:8080").unwrap();
+        let u = normalize_url("localhost:8080", None).unwrap();
         assert_eq!(u.scheme(), "https");
         assert_eq!(u.host_str(), Some("localhost"));
         assert_eq!(u.port(), Some(8080));
@@ -1717,15 +1795,80 @@ mod normalize_url_tests {
 
     #[test]
     fn preserves_about_blank() {
-        let u = normalize_url("about:blank").unwrap();
+        let u = normalize_url("about:blank", None).unwrap();
         assert_eq!(u.scheme(), "about");
         assert_eq!(u.path(), "blank");
     }
 
     #[test]
     fn preserves_data_url() {
-        let u = normalize_url("data:text/plain,hello").unwrap();
+        let u = normalize_url("data:text/plain,hello", None).unwrap();
         assert_eq!(u.scheme(), "data");
+    }
+
+    #[test]
+    fn rejects_app_origins_and_local_schemes() {
+        for raw in [
+            "tauri://localhost/viewer?path=~/.zshrc",
+            "asset://localhost/x",
+            "ipc://localhost/x",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ] {
+            assert!(normalize_url(raw, None).is_err(), "accepted {raw}");
+        }
+    }
+
+    #[test]
+    fn rejects_the_dev_server_origin() {
+        let dev = url::Url::parse("http://localhost:1420").unwrap();
+        assert!(normalize_url("http://localhost:1420/viewer", Some(&dev)).is_err());
+        assert!(normalize_url("http://localhost:3000/", Some(&dev)).is_ok());
+    }
+
+    #[test]
+    fn windows_protocol_hosts_are_app_origins() {
+        let url = url::Url::parse("http://tauri.localhost/").unwrap();
+        assert_eq!(is_web_page_url(&url, None), !cfg!(windows));
+    }
+
+    #[test]
+    fn windows_app_hosts_cover_tauri_trust_and_wry_routing() {
+        for host in [
+            "tauri.localhost",
+            "ipc.localhost",
+            "asset.localhost",
+            "future.localhost",
+            "asset.example.com",
+        ] {
+            assert!(is_windows_app_host(host), "allowed {host}");
+        }
+        for host in ["localhost", "example.com", "assets.example.com"] {
+            assert!(!is_windows_app_host(host), "blocked {host}");
+        }
+    }
+
+    #[test]
+    fn allows_iframe_schemes() {
+        for raw in [
+            "about:srcdoc",
+            "data:text/html,x",
+            "blob:https://site.example/1",
+            "blob:null/1",
+        ] {
+            let url = url::Url::parse(raw).unwrap();
+            assert!(is_web_page_url(&url, None), "rejected {raw}");
+        }
+    }
+
+    #[test]
+    fn judges_blob_urls_by_their_creator() {
+        let url = url::Url::parse("blob:tauri://localhost/1").unwrap();
+        assert!(!is_web_page_url(&url, None));
+
+        let dev = url::Url::parse("http://localhost:1420").unwrap();
+        let url = url::Url::parse("blob:http://localhost:1420/1").unwrap();
+        assert!(!is_web_page_url(&url, Some(&dev)));
     }
 
     #[test]
@@ -1873,7 +2016,7 @@ pub async fn owned_browser_navigate(
     reveal: Option<bool>,
 ) -> Result<(), String> {
     let state = browser_state();
-    let parsed: url::Url = normalize_url(&url)?;
+    let parsed: url::Url = normalize_url(&url, dev_server_url(&app).as_ref())?;
 
     prepare_navigation(
         &app,
@@ -1907,7 +2050,7 @@ pub async fn owned_browser_tab_navigate(
     owner: Option<String>,
 ) -> Result<(), String> {
     let state = browser_tab_state(&tab_id)?;
-    let parsed = normalize_url(&url)?;
+    let parsed = normalize_url(&url, dev_server_url(&app).as_ref())?;
     prepare_tab_navigation(&app, &state, &tab_id, &parsed, owner.as_deref()).await;
     inject_cookies_for_url_for_state(&app, &parsed, &state).await?;
     if let Some(active) = state.active().await {
