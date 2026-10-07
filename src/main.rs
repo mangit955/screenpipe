@@ -2,6 +2,7 @@
 //!
 //! Usage: wincheck <scenario> <mode> <out_dir>
 //!   mode filter  : filter block applied right after the webview is built
+//!   mode old     : the previous PR head's block (frame filter only)
 //!   mode control : no filter block (web messages enabled, no frame filter)
 //!   mode late    : filter block applied 1 s after start
 //!   mode nonav   : filter block applied, no top-level navigation handler
@@ -46,6 +47,7 @@ struct AppOrigins {
     windows: bool,
 }
 
+
 /// Whether the owned browser may load `url`. Tauri grants IPC to the app's own
 /// origins: its custom protocols (`tauri:`, `ipc:`, `asset:`; see
 /// [`is_windows_app_url`] for Windows) and the dev server. A page that reached
@@ -84,12 +86,16 @@ fn is_windows_app_url(url: &url::Url) -> bool {
     url.host_str()
         .is_some_and(|host| host.ends_with(".localhost"))
         || url.as_str().strip_prefix("http://").is_some_and(|rest| {
+            // Every protocol Tauri registers for this app: `tauri`, `ipc`, and
+            // `asset` (the `protocol-asset` feature). Add any scheme registered
+            // with `register_uri_scheme_protocol` here too.
             ["tauri", "ipc", "asset"].iter().any(|protocol| {
                 rest.strip_prefix(protocol)
                     .is_some_and(|rest| rest.starts_with('.'))
             })
         })
 }
+
 
 // ===== END VERBATIM COPY =====
 
@@ -109,9 +115,9 @@ impl Platform {
     }
 }
 
-fn apply_filter_block(platform: &Platform) {
+fn apply_old_block(platform: &Platform) {
     let origins = origins();
-// ===== BEGIN VERBATIM COPY: #[cfg(windows)] block of add_child_webview =====
+// ===== BEGIN VERBATIM COPY: #[cfg(windows)] block of add_child_webview at 310924e37 (previous PR head) =====
         #[cfg(windows)]
         unsafe {
             use webview2_com::{take_pwstr, NavigationStartingEventHandler};
@@ -137,7 +143,47 @@ fn apply_filter_block(platform: &Platform) {
             }
         }
 // ===== END VERBATIM COPY =====
-    log("[harness] filter block applied (SetIsWebMessageEnabled(false) + FrameNavigationStarting filter)");
+    log("[harness] OLD block applied (310924e37: FrameNavigationStarting only, SetCancel(!allowed))");
+}
+
+fn apply_filter_block(platform: &Platform) {
+    let origins = origins();
+// ===== BEGIN VERBATIM COPY: #[cfg(windows)] block of add_child_webview (round 3) =====
+        #[cfg(windows)]
+        unsafe {
+            use webview2_com::{take_pwstr, NavigationStartingEventHandler};
+            if let Ok(webview) = platform.controller().CoreWebView2() {
+                if let Ok(settings) = webview.Settings() {
+                    let _ = settings.SetIsWebMessageEnabled(false);
+                }
+                // `on_navigation` misses two kinds of navigation on Windows:
+                // iframes, which WebKit sends through it, and top-level URLs the
+                // `url` crate can't parse, which Tauri allows without asking. wry
+                // still routes those to the app's protocols (`http://tauri.xn--a/`).
+                let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                    let Some(args) = args else {
+                        return Ok(());
+                    };
+                    // A URI that can't be read or parsed is not allowed.
+                    let mut uri = windows_core::PWSTR::null();
+                    let allowed = args.Uri(&mut uri).is_ok()
+                        && url::Url::parse(&take_pwstr(uri))
+                            .is_ok_and(|url| is_web_page_url(&url, &origins));
+                    // Only ever cancel. wry's `on_navigation` handler was added
+                    // first, so it already ran and set its own decision.
+                    if allowed {
+                        Ok(())
+                    } else {
+                        args.SetCancel(true)
+                    }
+                }));
+                let mut token = 0;
+                let _ = webview.add_NavigationStarting(&handler, &mut token);
+                let _ = webview.add_FrameNavigationStarting(&handler, &mut token);
+            }
+        }
+// ===== END VERBATIM COPY =====
+    log("[harness] NEW block applied (NavigationStarting + FrameNavigationStarting, cancel-only)");
 }
 
 // ---------------------------------------------------------------- logging
@@ -302,6 +348,13 @@ fetch('/log?blob_url='+encodeURIComponent(u));document.getElementById('b').src=u
         "/s10a.html" => html("s10a", &top_nav_page("http://tauri.localhost/")),
         "/s10b.html" => html("s10b", &top_nav_page("http://tauri.example.com/")),
         "/s10c.html" => html("s10c", &top_nav_page("http://tauri.localhost@example.com/")),
+        // Top-level URLs Chromium accepts but the `url` crate can't parse.
+        "/s11a.html" => html("s11a", &top_nav_page("http://tauri.xn--a/")),
+        "/s11b.html" => html("s11b", &top_nav_page("http://asset.xn--a/x")),
+        "/s11c.html" => html("s11c", &top_nav_page("http://ipc.xn--a/")),
+        // Must stay allowed: a normal page on the same server.
+        "/s11d.html" => html("s11d", &top_nav_page("/landed.html")),
+        "/landed.html" => html("landed", "<p>LANDED OK</p><script>fetch('/log?landed_page_loaded')</script>"),
         "/sample.pdf" => ("application/pdf", sample_pdf()),
         "/log" => ("text/plain", b"ok".to_vec()),
         _ => return None,
@@ -534,6 +587,7 @@ fn main() {
     };
 
     let apply_now = matches!(mode.as_str(), "filter" | "nonav");
+    let apply_old = mode == "old";
     let apply_late = mode == "late";
     let nav_handler = mode != "nonav";
     log(format!(
@@ -603,6 +657,9 @@ fn main() {
     let platform = Platform(webview.controller());
     if apply_now {
         apply_filter_block(&platform);
+    }
+    if apply_old {
+        apply_old_block(&platform);
     }
     let core = webview.webview();
     if let Err(e) = unsafe { install_observers(&core) } {
