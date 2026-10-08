@@ -51,6 +51,14 @@ export function useRetainedState<T>(
 }
 
 /**
+ * Change a retained value while its section is closed, so the next mount
+ * starts from the changed value. An open section keeps its own state.
+ */
+export function updateRetainedState<T>(key: string, update: (value: T) => T) {
+  if (retained.has(key)) retained.set(key, update(retained.get(key) as T));
+}
+
+/**
  * Forget every retained value in this window, including what open sections
  * would save later, so each section's next mount starts from `initial`.
  * Tests call this between cases; after a data deletion, use

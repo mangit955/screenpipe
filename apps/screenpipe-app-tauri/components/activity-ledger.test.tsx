@@ -2597,6 +2597,36 @@ describe("ActivityLedger after a tab switch", () => {
     expect(screen.queryByTestId("activity-ledger-skeleton")).toBeNull();
   });
 
+  it("holds \"Enable activities\" until this visit's cache lookup answers", async () => {
+    mocks.settings.activitiesEnabled = false;
+    render(<ActivityLedger />);
+    await screen.findByRole("button", { name: "Enable activities" });
+    cleanup();
+
+    let resolveCache!: (value: { entries: []; coverage: [] }) => void;
+    mocks.loadPersistedActivityHistory.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCache = resolve;
+        }),
+    );
+    render(<ActivityLedger />);
+
+    // The kept page shows the button at once, but generating spends AI
+    // usage, so it waits for the cache that may already hold this range.
+    const enable = await screen.findByRole("button", {
+      name: "Enable activities",
+    });
+    expect(enable).toBeDisabled();
+    fireEvent.click(enable);
+    expect(mocks.runDailySummaryWithPi).not.toHaveBeenCalled();
+
+    await act(async () => resolveCache({ entries: [], coverage: [] }));
+    expect(
+      screen.getByRole("button", { name: "Enable activities" }),
+    ).toBeEnabled();
+  });
+
   it("starts a relative range over when it is reopened on a new day", async () => {
     mocks.settings.activitiesEnabled = false;
     render(<ActivityLedger />);

@@ -164,6 +164,32 @@ describe("RetentionSettings account-plan independence", () => {
     expect(mocks.emit).toHaveBeenCalledWith("recorded-data-deleted");
   });
 
+  it("drops what every window kept once a cleanup run has had time to finish", async () => {
+    mocks.settings = { ...mocks.settings, localRetentionEnabled: true };
+    const kept = renderHook(() => useRetainedState("test:deleted", "empty"));
+    act(() => kept.result.current[1]("expired meeting"));
+    kept.unmount();
+    mocks.localFetch.mockImplementation(((path: string) =>
+      path === "/retention/run"
+        ? Promise.resolve(new Response(JSON.stringify({ ok: true })))
+        : new Promise<Response>(() => {})) as never);
+
+    render(<RetentionSettings />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Clean up now" }));
+    });
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Cleanup triggered" }),
+    );
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+
+    const next = renderHook(() => useRetainedState("test:deleted", "empty"));
+    expect(next.result.current[0]).toBe("empty");
+    expect(mocks.emit).toHaveBeenCalledWith("recorded-data-deleted");
+  });
+
   it("renders the low-disk threshold supplied by the native engine", async () => {
     mocks.getLowDiskGuardConfig.mockResolvedValueOnce({
       thresholdBytes: 32 * 1024 ** 3,

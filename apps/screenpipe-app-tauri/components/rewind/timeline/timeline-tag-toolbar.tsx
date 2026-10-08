@@ -209,8 +209,12 @@ export function TimelineTagToolbar({ anchorRect, onAskAI, onRunPipe, templatePip
 			clearTextCache();
 			await clearTimelineCache();
 			// The reload resets this window; other windows' retained lists may
-			// still hold the deleted range.
-			await forgetRetainedStateEverywhere();
+			// still hold the deleted range. Let that message go out first, but a
+			// stuck one must not block the reload.
+			await Promise.race([
+				forgetRetainedStateEverywhere(),
+				new Promise((resolve) => setTimeout(resolve, 1000)),
+			]);
 			window.location.reload();
 		} catch (e) {
 			toast({ title: ui("Deletion failed"), description: String(e), variant: "destructive" });

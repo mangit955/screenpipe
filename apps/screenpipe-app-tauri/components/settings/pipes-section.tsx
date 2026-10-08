@@ -1158,9 +1158,10 @@ export function PipesSection() {
   // empty list.
   const [loading, setLoading] = useState(pipesApiBase === null);
   const [settledApiBase, setSettledApiBase] = useState(pipesApiBase);
-  // True once this visit's own list has arrived; the one above may be kept
-  // from an earlier visit.
-  const [listRefreshed, setListRefreshed] = useState(false);
+  // The device this visit has loaded the list from; null until it has. The
+  // list and `pipesApiBase` above may be kept from an earlier visit, so they
+  // can't vouch for this one: a load failing now still shows its error.
+  const [loadedApiBase, setLoadedApiBase] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const currentApiBase = useRef("");
   const pipesRequests = useRef(new ApiRequestSequence());
@@ -1390,7 +1391,7 @@ export function PipesSection() {
       const previousPipesApiBase = pipesApiBaseRef.current;
       pipesApiBaseRef.current = apiBase;
       setPipesApiBase(apiBase);
-      setListRefreshed(true);
+      setLoadedApiBase(apiBase);
       // Preserve optimistic UI for pipes with in-flight config saves
       const pendingNames = Object.keys(pendingConfigSaves.current);
       if (pendingNames.length > 0 && previousPipesApiBase === apiBase) {
@@ -2342,7 +2343,7 @@ export function PipesSection() {
     const openInstalledPipe = (pipeName: string) => {
       // Until this visit's list arrives the link stays pending: the kept list
       // may name a task deleted since, or lack one added since.
-      if (!isSafePipeName(pipeName) || !listRefreshed) return;
+      if (!isSafePipeName(pipeName) || loadedApiBase === null) return;
       if (!pipes.some((pipe) => pipe.config.name === pipeName)) {
         clearPendingPipeDeepLink();
         return;
@@ -2369,7 +2370,7 @@ export function PipesSection() {
     return () => {
       void unlisten.then((stop) => stop());
     };
-  }, [expanded, listRefreshed, pipes]);
+  }, [expanded, loadedApiBase, pipes]);
 
   const savePipeContent = useCallback(async (name: string, content: string) => {
     const pipe = pipes.find((candidate) => candidate.config.name === name);
@@ -2688,7 +2689,7 @@ export function PipesSection() {
             </Card>
           ))}
         </div>
-      ) : shouldShowPipesLoadError(loadError, apiBase, pipesApiBase) ? (
+      ) : shouldShowPipesLoadError(loadError, apiBase, loadedApiBase) ? (
         <Card>
           <CardContent className="py-8 text-center">
             <div className="mx-auto max-w-md space-y-4 text-muted-foreground">

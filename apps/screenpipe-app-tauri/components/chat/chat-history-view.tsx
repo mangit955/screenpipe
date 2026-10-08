@@ -9,6 +9,7 @@ import { Archive, CheckSquare, Download, FolderOpen, Loader2, MessageSquare, Mor
 import { cn } from "@/lib/utils";
 import { usePlatform } from "@/lib/hooks/use-platform";
 import { useRetainedState } from "@/lib/hooks/use-retained-state";
+import { CHAT_HISTORY_LIST_KEY } from "@/lib/hooks/use-forget-retained-state";
 import { isInjectedTitle } from "@/lib/chat-utils";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -92,7 +93,7 @@ export function ChatHistoryView({
   const [query, setQuery] = useRetainedState("chatHistory:query", "");
   const [conversations, setConversations] = useRetainedState<
     ConversationMeta[]
-  >("chatHistory:list", []);
+  >(CHAT_HISTORY_LIST_KEY, []);
   const [hasMore, setHasMore] = useRetainedState("chatHistory:hasMore", false);
   const [shownView, setShownView] = useRetainedState<string | null>(
     "chatHistory:view",

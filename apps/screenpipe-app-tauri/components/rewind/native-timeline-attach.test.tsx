@@ -162,63 +162,6 @@ describe("native timeline startup API config", () => {
     });
   });
 
-  it("attaches straight away when the tab is opened again", async () => {
-    render(<NativeTimeline fallback={<div>react fallback</div>} />);
-    await act(async () => {
-      resolveApiReady?.();
-    });
-    await waitFor(() => {
-      expect(mocks.emit).toHaveBeenCalledWith(
-        "native-timeline-attach",
-        expect.anything(),
-      );
-    });
-    // Switching tabs unmounts the section, which detaches the window.
-    cleanup();
-    mocks.emit.mockClear();
-
-    mocks.nativeTimelineIsAvailable.mockImplementation(() => new Promise(() => {}));
-    render(<NativeTimeline fallback={<div>react fallback</div>} />);
-
-    expect(screen.queryByText("react fallback")).toBeNull();
-    // Neither check has answered this visit; the attach doesn't wait for them.
-    await act(async () => {});
-    expect(mocks.emit).toHaveBeenCalledWith(
-      "native-timeline-attach",
-      expect.objectContaining({ windowLabel: "home", port: 3130 }),
-    );
-  });
-
-  it("sends a single attach when React mounts the section twice in development", async () => {
-    render(<NativeTimeline fallback={<div>react fallback</div>} />);
-    await act(async () => {
-      resolveApiReady?.();
-    });
-    await waitFor(() => {
-      expect(mocks.emit).toHaveBeenCalledWith(
-        "native-timeline-attach",
-        expect.anything(),
-      );
-    });
-    cleanup();
-    mocks.emit.mockClear();
-
-    // StrictMode runs the attach effect, its cleanup and the effect again back
-    // to back. Tauri runs each emit as its own task, so attach, detach, attach
-    // could land out of order and leave the timeline detached.
-    render(
-      <React.StrictMode>
-        <NativeTimeline fallback={<div>react fallback</div>} />
-      </React.StrictMode>,
-    );
-    await act(async () => {});
-
-    const placement = mocks.emit.mock.calls
-      .map(([event]) => event)
-      .filter((event) => String(event).startsWith("native-timeline-"));
-    expect(placement).toEqual(["native-timeline-attach"]);
-  });
-
   it("does not keep pulling the playhead back after a starred timestamp is accepted", async () => {
     mocks.nativeTimelineNavigate.mockResolvedValue(true);
     render(<NativeTimeline fallback={<div>react fallback</div>} />);

@@ -163,4 +163,25 @@ describe("ChatHistoryView after leaving it", () => {
       globalThis.IntersectionObserver = original;
     }
   });
+
+  it("shows the spinner, not an empty list, on the visit after a failed refresh", async () => {
+    mocks.listConversations.mockResolvedValue([
+      conversation("a", "Quarterly planning"),
+    ]);
+    renderHistory();
+    await screen.findByText("Quarterly planning");
+    cleanup();
+
+    // The return visit's refresh fails.
+    mocks.listConversations.mockRejectedValue(new Error("disk busy"));
+    renderHistory();
+    await screen.findByText("No chats yet.");
+    cleanup();
+
+    mocks.listConversations.mockImplementation(() => new Promise(() => undefined));
+    renderHistory();
+
+    expect(screen.queryByText("No chats yet.")).toBeNull();
+    expect(screen.getByText("Loading chats…")).toBeInTheDocument();
+  });
 });

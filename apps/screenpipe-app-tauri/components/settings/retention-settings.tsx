@@ -366,6 +366,8 @@ export function RetentionSettings({
       }
       toast({ title: ui("Cleanup triggered") });
       setTimeout(() => {
+        // Sections' retained lists may still show what the cleanup removed.
+        void forgetRetainedStateEverywhere();
         fetchStatus();
         onStorageChanged?.();
       }, 3000);

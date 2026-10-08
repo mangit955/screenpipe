@@ -7,13 +7,14 @@ import { describe, expect, it, vi } from "vitest";
 // Stands in for Tauri's event bus: `emit` reaches every `listen`er, as an
 // app-wide event reaches every window.
 const bus = vi.hoisted(() => {
-  const listeners = new Map<string, Set<() => void>>();
+  type Listener = (event: { payload: unknown }) => void;
+  const listeners = new Map<string, Set<Listener>>();
   return {
     listeners,
-    emit: vi.fn(async (event: string) => {
-      for (const listener of listeners.get(event) ?? []) listener();
+    emit: vi.fn(async (event: string, payload?: unknown) => {
+      for (const listener of listeners.get(event) ?? []) listener({ payload });
     }),
-    listen: vi.fn(async (event: string, listener: () => void) => {
+    listen: vi.fn(async (event: string, listener: Listener) => {
       if (!listeners.has(event)) listeners.set(event, new Set());
       listeners.get(event)!.add(listener);
       return () => listeners.get(event)!.delete(listener);
@@ -27,6 +28,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import {
+  CHAT_HISTORY_LIST_KEY,
   forgetRetainedStateEverywhere,
   useForgetRetainedStateOnDeletion,
 } from "@/lib/hooks/use-forget-retained-state";
@@ -64,5 +66,28 @@ describe("forgetting retained state after a deletion", () => {
     await act(() => bus.emit("recorded-data-deleted"));
 
     expect(nextMount()).toBe("empty");
+  });
+
+  it("drops a chat deleted in any window from History's kept list", async () => {
+    renderHook(() => useForgetRetainedStateOnDeletion());
+    await waitFor(() => expect(bus.listeners.get("chat-deleted")?.size).toBe(1));
+    const history = renderHook(() =>
+      useRetainedState<{ id: string; title: string }[]>(CHAT_HISTORY_LIST_KEY, []),
+    );
+    act(() =>
+      history.result.current[1]([
+        { id: "a", title: "Divorce lawyer questions" },
+        { id: "b", title: "Groceries" },
+      ]),
+    );
+    history.unmount();
+
+    // Deleted from the chat sidebar while History is closed.
+    await act(() => bus.emit("chat-deleted", { id: "a" }));
+
+    const next = renderHook(() =>
+      useRetainedState<{ id: string; title: string }[]>(CHAT_HISTORY_LIST_KEY, []),
+    );
+    expect(next.result.current[0]).toEqual([{ id: "b", title: "Groceries" }]);
   });
 });

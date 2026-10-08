@@ -36,7 +36,6 @@ import {
 import { TimelineDailySummary } from "@/components/rewind/timeline/daily-summary";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
-import { useRetainedState } from "@/lib/hooks/use-retained-state";
 import { forgetRetainedStateEverywhere } from "@/lib/hooks/use-forget-retained-state";
 import { clearTimelineCache } from "@/lib/hooks/use-timeline-cache";
 import { clearTextCache } from "@/lib/hooks/use-frame-text-data";
@@ -357,21 +356,12 @@ export function NativeTimeline({
 }) {
 
   const hostRef = useRef<HTMLDivElement | null>(null);
-  // Both checks below hold for the life of the window. Retaining them lets a
-  // return to the tab attach straight away instead of mounting the React
-  // fallback for a frame first.
-  const [available, setAvailable] = useRetainedState<boolean | null>(
-    "nativeTimeline:available",
-    null,
-  );
+  const [available, setAvailable] = useState<boolean | null>(null);
   // `getApiPort()` is intentionally synchronous, but its value starts at the
   // production default until `get_local_api_config` resolves. Attaching during
   // that gap permanently pointed Swift at 3030 in isolated dev/E2E builds,
   // even after the webview learned the real port.
-  const [apiReady, setApiReady] = useRetainedState(
-    "nativeTimeline:apiReady",
-    false,
-  );
+  const [apiReady, setApiReady] = useState(false);
   // Null while the first attach is in flight. A failed attach leaves a
   // transparent hole where the timeline should be, which reads as a blank
   // screen, so the React one takes over instead.
@@ -439,7 +429,7 @@ export function NativeTimeline({
     return () => {
       cancelled = true;
     };
-  }, [setAvailable]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -449,7 +439,7 @@ export function NativeTimeline({
     return () => {
       cancelled = true;
     };
-  }, [setApiReady]);
+  }, []);
 
   useEffect(() => {
     const navigation = nativePendingNavigation;
@@ -509,15 +499,12 @@ export function NativeTimeline({
     if (!host) return;
 
     const detachPayload = { windowLabel: getCurrentWindow().label };
-    let attachSent = false;
-    let disposed = false;
 
     // Rounded, because a fractional rect leaves a seam between the child
     // window and the webview underneath it.
     const place = (underlay = false) => {
       const box = host.getBoundingClientRect();
       if (box.width < 1 || box.height < 1) return;
-      attachSent = true;
       void emit("native-timeline-attach", {
         // Which window is asking. Two surfaces show a timeline — the main
         // window's section and the overlay — and each needs its own.
@@ -569,14 +556,7 @@ export function NativeTimeline({
       queued = requestAnimationFrame(sync);
     };
 
-    // Attach once React has finished mounting. Its development double mount
-    // runs this effect, the cleanup and the effect again back to back, and
-    // Tauri runs each emit as its own task, so attach, detach, attach could
-    // land out of order and leave the timeline detached. Only the surviving
-    // run attaches, and a run that never attached has nothing to detach.
-    queueMicrotask(() => {
-      if (!disposed) place();
-    });
+    place();
     const resize = new ResizeObserver(schedule);
     resize.observe(host);
     // Overlays mount anywhere under body, so the whole subtree is the target.
@@ -585,14 +565,13 @@ export function NativeTimeline({
     window.addEventListener("resize", schedule);
 
     return () => {
-      disposed = true;
       if (queued) cancelAnimationFrame(queued);
       resize.disconnect();
       overlays.disconnect();
       window.removeEventListener("resize", schedule);
       // Leaving the section has to take the window with it, or it floats over
       // whatever the user navigated to.
-      if (attachSent) void emit("native-timeline-detach", detachPayload);
+      void emit("native-timeline-detach", detachPayload);
     };
   }, [apiReady, available, closeOnEscape, transparentHost]);
 

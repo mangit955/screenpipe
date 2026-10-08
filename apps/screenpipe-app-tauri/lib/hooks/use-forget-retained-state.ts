@@ -2,17 +2,23 @@
 // https://screenpipe.com
 
 import { emit } from "@tauri-apps/api/event";
-import { clearRetainedState } from "@/lib/hooks/use-retained-state";
+import {
+  clearRetainedState,
+  updateRetainedState,
+} from "@/lib/hooks/use-retained-state";
 import { useTauriEvent } from "@/lib/hooks/use-tauri-event";
 
-// Sent to every window when recorded data is deleted. Each window keeps its
-// own retained values, so each must forget them.
+// Sent to every window when recorded data is deleted or the data folder
+// changes. Each window keeps its own retained values, so each must forget them.
 const RECORDED_DATA_DELETED = "recorded-data-deleted";
 
+/** History's retained chat list (components/chat/chat-history-view.tsx). */
+export const CHAT_HISTORY_LIST_KEY = "chatHistory:list";
+
 /**
- * After recorded data is deleted: forget retained values in every window, so
- * each section's next visit loads from scratch instead of showing the
- * deleted data again.
+ * After recorded data is deleted or the data folder changes: forget retained
+ * values in every window, so each section's next visit loads from scratch
+ * instead of showing data that is gone.
  */
 export async function forgetRetainedStateEverywhere(): Promise<void> {
   clearRetainedState();
@@ -23,7 +29,14 @@ export async function forgetRetainedStateEverywhere(): Promise<void> {
   }
 }
 
-/** Mount once per window: forgets its retained values on any deletion. */
+/** Mount once per window: drops deleted data from its retained values. */
 export function useForgetRetainedStateOnDeletion() {
   useTauriEvent(RECORDED_DATA_DELETED, clearRetainedState);
+  // A chat deleted while History is closed must not show again, title and
+  // all, on its next visit. An open History reloads on this event itself.
+  useTauriEvent<{ id?: string }>("chat-deleted", ({ payload }) =>
+    updateRetainedState<{ id: string }[]>(CHAT_HISTORY_LIST_KEY, (chats) =>
+      chats.filter((chat) => chat.id !== payload?.id),
+    ),
+  );
 }

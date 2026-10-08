@@ -78,23 +78,47 @@ vi.mock("@/components/meeting-notes/list-view", () => ({
   ListView: ({
     meetings,
     onSelect,
+    onDelete,
     hasMore,
+    canLoadMore,
     onLoadMore,
+    errorText,
     comingUpStatus,
+    searchInput,
+    onSearchInputChange,
   }: {
     meetings: MeetingRecord[];
     onSelect: (id: number) => void;
+    onDelete: (id: number) => void;
     hasMore: boolean;
+    canLoadMore: boolean;
     onLoadMore: () => void;
+    errorText: string | null;
     comingUpStatus: string;
+    searchInput: string;
+    onSearchInputChange: (value: string) => void;
   }) => (
     <div data-testid="meetings-list" data-coming-up={comingUpStatus}>
+      <input
+        aria-label="search"
+        value={searchInput}
+        onChange={(event) => onSearchInputChange(event.target.value)}
+      />
+      {errorText ? <p role="alert">{errorText}</p> : null}
       {meetings.map((meeting) => (
-        <button key={meeting.id} onClick={() => onSelect(meeting.id)}>
-          {meeting.title}
-        </button>
+        <div key={meeting.id}>
+          <button onClick={() => onSelect(meeting.id)}>{meeting.title}</button>
+          <button
+            aria-label={`delete ${meeting.title}`}
+            onClick={() => onDelete(meeting.id)}
+          />
+        </div>
       ))}
-      {hasMore ? <button onClick={onLoadMore}>Show more</button> : null}
+      {hasMore ? (
+        <button onClick={onLoadMore} disabled={!canLoadMore}>
+          Show more
+        </button>
+      ) : null}
     </div>
   ),
 }));
@@ -482,13 +506,214 @@ describe("MeetingNotesSection after a tab switch", () => {
     renderMeetingNotes();
 
     // The kept list's offset would be applied to the list page one replaces.
-    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
-    expect(mocks.localFetch.mock.calls.some(isNextPage)).toBe(false);
+    expect(screen.getByRole("button", { name: "Show more" })).toBeDisabled();
 
     await act(async () => {
       for (const resolve of pending) resolve(meetingsResponse(page));
     });
     fireEvent.click(screen.getByRole("button", { name: "Show more" }));
     expect(mocks.localFetch.mock.calls.some(isNextPage)).toBe(true);
+  });
+
+  it("opens a row clicked before this visit's list arrives from fresh data", async () => {
+    mocks.localFetch.mockImplementation(async () =>
+      meetingsResponse([emptyNoteMeeting]),
+    );
+    renderMeetingNotes();
+    await screen.findByRole("button", { name: emptyNoteMeeting.title! });
+    cleanup();
+
+    // A summary was written while the user was on another tab.
+    const fresh = { ...emptyNoteMeeting, note: "## Summary\nShip it." };
+    const pending: Array<(response: Response) => void> = [];
+    mocks.localFetch.mockImplementation((path: string) =>
+      path.startsWith("/meetings?")
+        ? new Promise<Response>((resolve) => pending.push(resolve))
+        : Promise.resolve(
+            new Response(JSON.stringify(fresh), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          ),
+    );
+    renderMeetingNotes();
+    fireEvent.click(
+      screen.getByRole("button", { name: emptyNoteMeeting.title! }),
+    );
+
+    // The kept row's note is out of date; typing over it would overwrite the
+    // summary.
+    expect(screen.queryByRole("region", { name: "meeting note" })).toBeNull();
+
+    await act(async () => {
+      for (const resolve of pending) resolve(meetingsResponse([fresh]));
+    });
+    expect(await screen.findByTestId("saved-note")).toHaveTextContent(
+      "Ship it.",
+    );
+  });
+
+  it("keeps a second-page row open when this visit's first page arrives", async () => {
+    const row = (id: number) => ({ ...emptyNoteMeeting, id, title: `m${id}` });
+    const all = Array.from({ length: 60 }, (_, index) => row(1000 - index));
+    const answer = (path: string) => {
+      if (path.startsWith("/meetings/")) {
+        const id = Number(path.slice("/meetings/".length));
+        return new Response(JSON.stringify(row(id)), { status: 200 });
+      }
+      const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+      return meetingsResponse(all.slice(offset, offset + 30));
+    };
+    mocks.localFetch.mockImplementation(async (path: string) => answer(path));
+    renderMeetingNotes();
+    await screen.findByRole("button", { name: "m1000" });
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    await screen.findByRole("button", { name: "m950" });
+    cleanup();
+
+    const pending: Array<() => void> = [];
+    mocks.localFetch.mockImplementation((path: string) =>
+      path.startsWith("/meetings?")
+        ? new Promise<Response>((resolve) =>
+            pending.push(() => resolve(answer(path))),
+          )
+        : Promise.resolve(answer(path)),
+    );
+    renderMeetingNotes();
+    fireEvent.click(screen.getByRole("button", { name: "m950" }));
+    await act(async () => {
+      for (const resolve of pending) resolve();
+    });
+
+    // Page one alone doesn't hold m950; opening it fetched it by id.
+    expect(
+      await screen.findByRole("region", { name: "meeting note" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the error instead of the kept rows when this visit's fetch fails", async () => {
+    mocks.localFetch.mockImplementation(async () =>
+      meetingsResponse([emptyNoteMeeting]),
+    );
+    renderMeetingNotes();
+    await screen.findByRole("button", { name: emptyNoteMeeting.title! });
+    cleanup();
+
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.localFetch.mockImplementation(
+      async () => new Response("database is locked", { status: 500 }),
+    );
+    renderMeetingNotes();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("HTTP 500");
+    // They can't be confirmed, and "Show more" would page from their length.
+    expect(
+      screen.queryByRole("button", { name: emptyNoteMeeting.title! }),
+    ).toBeNull();
+    cleanup();
+
+    // Nothing was confirmed, so the next visit starts from the skeleton
+    // rather than "No meetings yet".
+    mocks.localFetch.mockImplementation(() => new Promise(() => undefined));
+    renderMeetingNotes();
+    expect(screen.queryByTestId("meetings-list")).toBeNull();
+    vi.mocked(console.error).mockRestore();
+  });
+
+  it("applies a search typed just before leaving, without the old query's rows", async () => {
+    const alpha = { ...emptyNoteMeeting, id: 1, title: "alpha sync" };
+    const beta = { ...emptyNoteMeeting, id: 2, title: "beta review" };
+    mocks.localFetch.mockImplementation(async () =>
+      meetingsResponse([alpha, beta]),
+    );
+    renderMeetingNotes();
+    await screen.findByRole("button", { name: "beta review" });
+    // Leave inside the search debounce.
+    fireEvent.change(screen.getByLabelText("search"), {
+      target: { value: "beta" },
+    });
+    cleanup();
+
+    const requests: string[] = [];
+    mocks.localFetch.mockImplementation(async (path: string) => {
+      requests.push(path);
+      return meetingsResponse(path.includes("q=beta") ? [beta] : [alpha, beta]);
+    });
+    renderMeetingNotes();
+
+    expect(screen.getByLabelText("search")).toHaveValue("beta");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "alpha sync" }),
+      ).toBeNull(),
+    );
+    expect(requests.filter((path) => path.startsWith("/meetings?"))).toEqual([
+      "/meetings?limit=30&offset=0&q=beta",
+    ]);
+  });
+
+  it("keeps the newest search's rows when an older answer lands last", async () => {
+    const alpha = { ...emptyNoteMeeting, id: 1, title: "alpha sync" };
+    const beta = { ...emptyNoteMeeting, id: 2, title: "beta review" };
+    const pending = new Map<string, (response: Response) => void>();
+    mocks.localFetch.mockImplementation(
+      (path: string) =>
+        new Promise<Response>((resolve) => pending.set(path, resolve)),
+    );
+    renderMeetingNotes();
+    await act(async () => {
+      pending.get("/meetings?limit=30&offset=0")!(
+        meetingsResponse([alpha, beta]),
+      );
+    });
+
+    fireEvent.change(screen.getByLabelText("search"), {
+      target: { value: "a" },
+    });
+    await waitFor(() => expect(pending.has("/meetings?limit=30&offset=0&q=a")).toBe(true));
+    fireEvent.change(screen.getByLabelText("search"), {
+      target: { value: "beta" },
+    });
+    await waitFor(() =>
+      expect(pending.has("/meetings?limit=30&offset=0&q=beta")).toBe(true),
+    );
+
+    await act(async () => {
+      pending.get("/meetings?limit=30&offset=0&q=beta")!(meetingsResponse([beta]));
+    });
+    await act(async () => {
+      pending.get("/meetings?limit=30&offset=0&q=a")!(
+        meetingsResponse([alpha, beta]),
+      );
+    });
+
+    expect(screen.queryByRole("button", { name: "alpha sync" })).toBeNull();
+    expect(screen.getByRole("button", { name: "beta review" })).toBeInTheDocument();
+  });
+
+  it("keeps a meeting deleted while this visit's refresh is in flight gone", async () => {
+    const alpha = { ...emptyNoteMeeting, id: 1, title: "alpha sync" };
+    const beta = { ...emptyNoteMeeting, id: 2, title: "beta review" };
+    mocks.localFetch.mockImplementation(async () =>
+      meetingsResponse([alpha, beta]),
+    );
+    renderMeetingNotes();
+    await screen.findByRole("button", { name: "beta review" });
+    cleanup();
+
+    const pending: Array<(response: Response) => void> = [];
+    mocks.localFetch.mockImplementation(
+      (path: string) =>
+        new Promise<Response>((resolve) => pending.push(resolve)),
+    );
+    renderMeetingNotes();
+    fireEvent.click(screen.getByLabelText("delete beta review"));
+
+    // The server answered the list before it processed the delete.
+    await act(async () => {
+      for (const resolve of pending) resolve(meetingsResponse([alpha, beta]));
+    });
+    expect(screen.getByRole("button", { name: "alpha sync" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "beta review" })).toBeNull();
   });
 });

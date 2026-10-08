@@ -74,4 +74,32 @@ describe("UsageSection after a tab switch", () => {
 
     expect(screen.getByText(NO_DATA)).toBeInTheDocument();
   });
+
+  it("shows the last non-empty totals at once", async () => {
+    mocks.loadAllConversations.mockResolvedValue([
+      {
+        id: "c1",
+        messages: [
+          { role: "user", timestamp: Date.now() - 1000 },
+          {
+            role: "assistant",
+            timestamp: Date.now(),
+            model: "kept-model-x",
+            provider: "screenpipe-cloud",
+          },
+        ],
+      },
+    ]);
+    render(<UsageSection />);
+    expect((await screen.findAllByText(/kept-model-x/)).length).toBeGreaterThan(0);
+    cleanup();
+
+    mocks.loadAllConversations.mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    render(<UsageSection />);
+
+    expect(screen.getAllByText(/kept-model-x/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(NO_DATA)).toBeNull();
+  });
 });

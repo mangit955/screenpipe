@@ -21,7 +21,7 @@ const props: React.ComponentProps<typeof ListView> = {
     detection_source: "manual", created_at: "2026-09-26T12:00:00Z",
   },
   onSelect: noop, onDelete: noop, onMerged: noop, onStart: noop, onStop: noop,
-  onStartFromEvent: noop, starting: false, loadingMore: false, hasMore: false,
+  onStartFromEvent: noop, starting: false, loadingMore: false, hasMore: false, canLoadMore: true,
   onLoadMore: noop, errorText: null, onRetry: noop, comingUp: [],
   comingUpStatus: "ready", connectedCalendarSources: [],
   onOpenCalendarConnections: noop, meetingActive: true, searchInput: "",
@@ -80,5 +80,18 @@ describe("meeting recording indicator", () => {
     render(<ListView {...props} />);
     expect(screen.queryByPlaceholderText("Search by title, email, note…")).toBeNull();
     expect(screen.queryByRole("button", { name: "Search meetings" })).toBeNull();
+  });
+});
+
+describe("meeting list paging", () => {
+  it("holds \"Show more\" until the list can be paged", () => {
+    const meetings = [props.activeMeeting!];
+    const { rerender } = render(
+      <ListView {...props} meetings={meetings} hasMore canLoadMore={false} />,
+    );
+    expect(screen.getByRole("button", { name: "Show more" })).toBeDisabled();
+
+    rerender(<ListView {...props} meetings={meetings} hasMore canLoadMore />);
+    expect(screen.getByRole("button", { name: "Show more" })).toBeEnabled();
   });
 });

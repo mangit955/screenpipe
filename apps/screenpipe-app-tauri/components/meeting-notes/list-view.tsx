@@ -37,6 +37,7 @@ interface ListViewProps {
   starting: boolean;
   loadingMore: boolean;
   hasMore: boolean;
+  canLoadMore: boolean;
   onLoadMore: () => void;
   errorText: string | null;
   onRetry: () => void;
@@ -65,6 +66,7 @@ export function ListView({
   starting,
   loadingMore,
   hasMore,
+  canLoadMore,
   onLoadMore,
   errorText,
   onRetry,
@@ -202,7 +204,7 @@ export function ListView({
                 variant="ghost"
                 size="sm"
                 onClick={onLoadMore}
-                disabled={loadingMore}
+                disabled={loadingMore || !canLoadMore}
                 className="gap-2 normal-case tracking-normal text-muted-foreground hover:text-foreground"
               >
                 {loadingMore ? (
