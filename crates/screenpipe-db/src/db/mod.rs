@@ -468,6 +468,8 @@ mod frames;
 mod maintenance;
 mod meetings;
 mod memories;
+#[cfg(test)]
+mod planner_stats_tests;
 mod starred;
 pub use starred::StarredSession;
 mod outputs;
