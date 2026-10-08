@@ -11,7 +11,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MeetingRecord } from "@/lib/utils/meeting-format";
 
 const TRANSCRIPT = "We agreed to ship the deterministic transcript view.";
@@ -35,6 +35,8 @@ const summarizedMeeting: MeetingRecord = {
 
 const mocks = vi.hoisted(() => ({
   localFetch: vi.fn(),
+  findOverlappingEvent: vi.fn(),
+  fetchUpcomingCalendarSnapshot: vi.fn(),
   openMeetingNoteListener: null as null | ((event: {
     payload: { meetingId: number; transcript?: boolean };
   }) => Promise<void>),
@@ -59,13 +61,10 @@ vi.mock("@/lib/hooks/use-health-check", () => ({
 }));
 vi.mock("@/lib/utils/calendar", () => ({
   attendeesToString: () => "",
+  calendarBindingKey: () => "calendar-event",
   fetchUpcomingCalendarEvents: vi.fn(async () => []),
-  fetchUpcomingCalendarSnapshot: vi.fn(async () => ({
-    events: [],
-    connectedSources: [],
-    failedSources: [],
-  })),
-  findOverlappingEvent: () => null,
+  fetchUpcomingCalendarSnapshot: mocks.fetchUpcomingCalendarSnapshot,
+  findOverlappingEvent: mocks.findOverlappingEvent,
   pickComingUp: () => [],
 }));
 vi.mock("@/lib/utils/live-capture-state", () => ({
@@ -79,16 +78,23 @@ vi.mock("@/components/meeting-notes/list-view", () => ({
   ListView: ({
     meetings,
     onSelect,
+    hasMore,
+    onLoadMore,
+    comingUpStatus,
   }: {
     meetings: MeetingRecord[];
     onSelect: (id: number) => void;
+    hasMore: boolean;
+    onLoadMore: () => void;
+    comingUpStatus: string;
   }) => (
-    <div>
+    <div data-testid="meetings-list" data-coming-up={comingUpStatus}>
       {meetings.map((meeting) => (
         <button key={meeting.id} onClick={() => onSelect(meeting.id)}>
           {meeting.title}
         </button>
       ))}
+      {hasMore ? <button onClick={onLoadMore}>Show more</button> : null}
     </div>
   ),
 }));
@@ -173,9 +179,18 @@ function meetingsResponse(meetings: MeetingRecord[]) {
   });
 }
 
+beforeEach(() => {
+  mocks.fetchUpcomingCalendarSnapshot.mockResolvedValue({
+    events: [],
+    connectedSources: [],
+    failedSources: [],
+  });
+});
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  mocks.findOverlappingEvent.mockReturnValue(null);
   mocks.openMeetingNoteListener = null;
   window.history.replaceState({}, "", "/");
   window.sessionStorage.clear();
@@ -305,5 +320,175 @@ describe("MeetingNotesSection meeting selection", () => {
       expect(reopenedNote).toHaveAttribute("data-transcript-open", "false"),
     );
     expect(screen.queryByText(TRANSCRIPT)).not.toBeInTheDocument();
+  });
+});
+
+describe("MeetingNotesSection after a tab switch", () => {
+  it("shows the last list without the skeleton, then refreshes it in place", async () => {
+    mocks.localFetch.mockResolvedValue(meetingsResponse([emptyNoteMeeting]));
+    renderMeetingNotes();
+    await screen.findByRole("button", { name: emptyNoteMeeting.title! });
+    // Switching tabs unmounts the section.
+    cleanup();
+
+    const pending: Array<(response: Response) => void> = [];
+    mocks.localFetch.mockImplementation(
+      () => new Promise<Response>((resolve) => pending.push(resolve)),
+    );
+    renderMeetingNotes();
+
+    expect(
+      screen.getByRole("button", { name: emptyNoteMeeting.title! }),
+    ).toBeInTheDocument();
+    expect(document.querySelector('[class*="animate-pulse"]')).toBeNull();
+    expect(pending.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      for (const resolve of pending) {
+        resolve(meetingsResponse([summarizedMeeting]));
+      }
+    });
+    expect(
+      await screen.findByRole("button", { name: summarizedMeeting.title! }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: emptyNoteMeeting.title! }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("waits for this visit's list before enriching the active meeting", async () => {
+    const active: MeetingRecord = {
+      ...emptyNoteMeeting,
+      id: 50,
+      title: "standup",
+      meeting_end: null,
+    };
+    const props = {
+      meetingState: {
+        active: true,
+        activeMeetingId: active.id,
+        manualActive: false,
+      } as never,
+      meetingLoading: false,
+      onToggleMeeting: vi.fn(),
+    };
+    mocks.localFetch.mockImplementation(async () => meetingsResponse([active]));
+    render(<MeetingNotesSection {...props} />);
+    await screen.findByRole("button", { name: "standup" });
+    cleanup();
+
+    // Renamed elsewhere while the tab was closed; the retained row is stale.
+    mocks.findOverlappingEvent.mockReturnValue({ title: "From calendar" });
+    const pending: Array<(response: Response) => void> = [];
+    mocks.localFetch.mockImplementation((path: string) =>
+      path.startsWith("/meetings?")
+        ? new Promise<Response>((resolve) => pending.push(resolve))
+        : Promise.resolve(
+            new Response(JSON.stringify({ title: "renamed", attendees: "" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          ),
+    );
+    const isPut = ([path, init]: unknown[]) =>
+      path === `/meetings/${active.id}` &&
+      (init as RequestInit | undefined)?.method === "PUT";
+    render(<MeetingNotesSection {...props} />);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(mocks.localFetch.mock.calls.some(isPut)).toBe(false);
+
+    await act(async () => {
+      for (const resolve of pending) {
+        resolve(meetingsResponse([{ ...active, title: "renamed" }]));
+      }
+    });
+    await waitFor(() =>
+      expect(mocks.localFetch.mock.calls.some(isPut)).toBe(true),
+    );
+    const put = mocks.localFetch.mock.calls.find(isPut)!;
+    expect(JSON.parse(String((put[1] as RequestInit).body)).title).toBe(
+      "renamed",
+    );
+  });
+
+  it("loads from the skeleton again when the last visit's load failed", async () => {
+    mocks.localFetch.mockResolvedValue(new Response("down", { status: 503 }));
+    renderMeetingNotes();
+    await screen.findByTestId("meetings-list");
+    cleanup();
+
+    mocks.localFetch.mockImplementation(() => new Promise(() => undefined));
+    renderMeetingNotes();
+
+    // Not an empty list, which would read as "no meetings yet".
+    expect(screen.queryByTestId("meetings-list")).toBeNull();
+    expect(document.querySelector('[class*="animate-pulse"]')).not.toBeNull();
+  });
+
+  it("checks the calendar again instead of repeating the last visit's failure", async () => {
+    const google = { id: "google", label: "Google" };
+    mocks.fetchUpcomingCalendarSnapshot.mockResolvedValue({
+      events: [],
+      connectedSources: [google],
+      failedSources: [google],
+    });
+    mocks.localFetch.mockResolvedValue(meetingsResponse([emptyNoteMeeting]));
+    renderMeetingNotes();
+    await waitFor(() =>
+      expect(screen.getByTestId("meetings-list")).toHaveAttribute(
+        "data-coming-up",
+        "error",
+      ),
+    );
+    cleanup();
+
+    let answer!: (snapshot: unknown) => void;
+    mocks.fetchUpcomingCalendarSnapshot.mockImplementation(
+      () => new Promise((resolve) => (answer = resolve)),
+    );
+    mocks.localFetch.mockResolvedValue(meetingsResponse([emptyNoteMeeting]));
+    renderMeetingNotes();
+
+    const list = screen.getByTestId("meetings-list");
+    expect(list).toHaveAttribute("data-coming-up", "loading");
+    await act(async () =>
+      answer({ events: [], connectedSources: [google], failedSources: [] }),
+    );
+    expect(list).toHaveAttribute("data-coming-up", "empty");
+  });
+
+  it("waits for this visit's first page before showing more", async () => {
+    // A full page leaves more to show.
+    const page = Array.from({ length: 30 }, (_, index) => ({
+      ...emptyNoteMeeting,
+      id: 100 + index,
+      title: `meeting ${index}`,
+    }));
+    mocks.localFetch.mockImplementation(async () => meetingsResponse(page));
+    renderMeetingNotes();
+    await screen.findByRole("button", { name: "meeting 0" });
+    cleanup();
+
+    const pending: Array<(response: Response) => void> = [];
+    mocks.localFetch.mockImplementation((path: string) =>
+      path.includes("offset=0")
+        ? new Promise<Response>((resolve) => pending.push(resolve))
+        : Promise.resolve(meetingsResponse([])),
+    );
+    const isNextPage = ([path]: unknown[]) =>
+      String(path).includes("offset=30");
+    renderMeetingNotes();
+
+    // The kept list's offset would be applied to the list page one replaces.
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    expect(mocks.localFetch.mock.calls.some(isNextPage)).toBe(false);
+
+    await act(async () => {
+      for (const resolve of pending) resolve(meetingsResponse(page));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    expect(mocks.localFetch.mock.calls.some(isNextPage)).toBe(true);
   });
 });

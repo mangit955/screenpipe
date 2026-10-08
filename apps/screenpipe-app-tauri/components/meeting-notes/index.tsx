@@ -19,6 +19,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Skeleton } from "@/components/ui/skeleton";
 import { localFetch } from "@/lib/api";
 import { useHealthCheck } from "@/lib/hooks/use-health-check";
+import { useRetainedState } from "@/lib/hooks/use-retained-state";
 import {
   computeLiveCaptureState,
   type LiveCaptureDevice,
@@ -80,12 +81,16 @@ export function MeetingNotesSection({
   const uiLanguage = useLocale();
 
   const { health } = useHealthCheck();
-  const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
+  // The list, its search and the calendar outlive tab switches, so coming back
+  // shows them at once and the mount's fetches refresh them in place.
+  const [meetings, setMeetings] = useRetainedState<MeetingRecord[]>(
+    "meetings:list",
+    [],
+  );
   const meetingsRef = useRef<MeetingRecord[]>([]);
   meetingsRef.current = meetings;
-  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
+  const [hasMore, setHasMore] = useRetainedState("meetings:hasMore", true);
   const [errorText, setErrorText] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [transcriptOpenRequest, setTranscriptOpenRequest] = useState<{
@@ -113,17 +118,28 @@ export function MeetingNotesSection({
     },
     [],
   );
-  const [upcoming, setUpcoming] = useState<CalendarEvent[]>([]);
+  const [upcoming, setUpcoming] = useRetainedState<CalendarEvent[]>(
+    "meetings:upcoming",
+    [],
+  );
   const [calendarStatus, setCalendarStatus] =
-    useState<ComingUpStatus>("loading");
-  const [connectedCalendarSources, setConnectedCalendarSources] = useState<
-    CalendarSource[]
-  >([]);
+    useRetainedState<ComingUpStatus>("meetings:calendarStatus", "loading");
+  // Whether this visit's first calendar check has settled. Until it has, a
+  // failure retained from an earlier visit reads as still checking.
+  const [calendarChecked, setCalendarChecked] = useState(false);
+  const [connectedCalendarSources, setConnectedCalendarSources] =
+    useRetainedState<CalendarSource[]>("meetings:calendarSources", []);
   // Raw input value (drives the search field). `appliedQuery` is the value
   // actually sent to the server — debounced so we don't refetch on every
   // keystroke.
-  const [searchInput, setSearchInput] = useState("");
-  const [appliedQuery, setAppliedQuery] = useState("");
+  const [searchInput, setSearchInput] = useRetainedState(
+    "meetings:searchInput",
+    "",
+  );
+  const [appliedQuery, setAppliedQuery] = useRetainedState(
+    "meetings:appliedQuery",
+    "",
+  );
 
   // Debounce the search input → applied query.
   useEffect(() => {
@@ -131,19 +147,37 @@ export function MeetingNotesSection({
     if (trimmed === appliedQuery) return;
     const handle = setTimeout(() => setAppliedQuery(trimmed), 200);
     return () => clearTimeout(handle);
-  }, [searchInput, appliedQuery]);
+  }, [searchInput, appliedQuery, setAppliedQuery]);
 
+  // The query whose results are on screen, retained with them; null until a
+  // fetch succeeds, so a failed one shows the skeleton again next visit
+  // instead of passing for "no meetings". Refreshing the shown results stays
+  // silent; only a different query is a search worth showing progress for.
+  const [shownQuery, setShownQuery] = useRetainedState<string | null>(
+    "meetings:shownQuery",
+    null,
+  );
+  const shownQueryRef = useRef(shownQuery);
+  // Latest value mirrored during render (read only from fetchPage).
+  shownQueryRef.current = shownQuery;
+  const [loading, setLoading] = useState(shownQuery === null);
   // Set once we've completed the very first fetch, so subsequent reloads
-  // (search keystrokes, visibility refresh) don't blank the list out with
-  // the skeleton.
-  const initialLoadDoneRef = useRef(false);
-  const [refetching, setRefetching] = useState(false);
+  // (search keystrokes, visibility refresh, coming back to the tab) don't
+  // blank the list out with the skeleton.
+  const initialLoadDoneRef = useRef(!loading);
+  // False until this visit's first fetch settles. The list may be retained
+  // from an earlier visit, so effects that act on its rows (deep links,
+  // auto-enrich) wait for this, as they waited for `loading` before.
+  const [listRefreshed, setListRefreshed] = useState(false);
+  const [refetching, setRefetching] = useState(
+    () => !loading && appliedQuery !== shownQuery,
+  );
 
   const fetchPage = useCallback(
     async (offset: number, append: boolean, query: string) => {
       if (offset === 0) {
         if (!initialLoadDoneRef.current) setLoading(true);
-        else setRefetching(true);
+        else if (query !== shownQueryRef.current) setRefetching(true);
       } else {
         setLoadingMore(true);
       }
@@ -163,18 +197,20 @@ export function MeetingNotesSection({
         const data: MeetingRecord[] = await res.json();
         setHasMore(data.length >= PAGE_SIZE);
         setMeetings((prev) => (append ? [...prev, ...data] : data));
+        if (offset === 0) setShownQuery(query);
         setErrorText(null);
       } catch (err) {
         if (offset === 0) setErrorText(String(err));
         console.error("meeting notes: failed to fetch /meetings", err);
       } finally {
         initialLoadDoneRef.current = true;
+        setListRefreshed(true);
         setLoading(false);
         setRefetching(false);
         setLoadingMore(false);
       }
     },
-    [],
+    [setHasMore, setMeetings, setShownQuery],
   );
 
   // Initial load + reload whenever the applied query changes. We always
@@ -227,7 +263,7 @@ export function MeetingNotesSection({
         : null;
       selectMeeting(id, { openTranscript: transcript, initialTab });
     },
-    [fetchPage, selectMeeting],
+    [fetchPage, selectMeeting, setMeetings],
   );
 
   // On mount, if the URL contains a meetingId param (set by Rust when the
@@ -253,11 +289,11 @@ export function MeetingNotesSection({
     })(),
   );
   useEffect(() => {
-    if (loading || !urlMeetingRef.current) return;
+    if (!listRefreshed || !urlMeetingRef.current) return;
     const { id, transcript, preferBestView } = urlMeetingRef.current;
     urlMeetingRef.current = null;
     void openMeetingNote(id, transcript, preferBestView);
-  }, [loading, openMeetingNote]);
+  }, [listRefreshed, openMeetingNote]);
 
   useEffect(() => {
     const unlisten = listen<{ meetingId: number; transcript?: boolean }>(
@@ -339,8 +375,10 @@ export function MeetingNotesSection({
     } catch (err) {
       console.warn("meeting notes: failed to refresh calendar events", err);
       setCalendarStatus((prev) => (prev === "loading" ? "error" : prev));
+    } finally {
+      setCalendarChecked(true);
     }
-  }, []);
+  }, [setCalendarStatus, setConnectedCalendarSources, setUpcoming]);
 
   useEffect(() => {
     void refreshUpcoming();
@@ -419,6 +457,8 @@ export function MeetingNotesSection({
     const id = meetingState.activeMeetingId ?? null;
     if (id === null) return;
     if (enrichedMeetingIdsRef.current.has(id)) return;
+    // A retained row may be stale; writing it back could undo a newer edit.
+    if (!listRefreshed) return;
     const meeting = meetings.find((m) => m.id === id);
     if (!meeting) return; // wait for fetchPage to populate it
     if (meeting.detection_source === "manual") {
@@ -487,7 +527,7 @@ export function MeetingNotesSection({
         console.warn("meeting notes: auto-enrich failed", err);
       }
     })();
-  }, [meetings, meetingState.activeMeetingId]);
+  }, [listRefreshed, meetings, meetingState.activeMeetingId, setMeetings]);
 
   const handleStart = useCallback(
     async (seed?: {
@@ -514,7 +554,7 @@ export function MeetingNotesSection({
         setErrorText(String(err));
       }
     },
-    [meetingState.active, onToggleMeeting, selectMeeting],
+    [meetingState.active, onToggleMeeting, selectMeeting, setMeetings],
   );
 
   const handleResume = useCallback(
@@ -537,7 +577,7 @@ export function MeetingNotesSection({
         setErrorText(String(err));
       }
     },
-    [meetingState.active, onToggleMeeting, selectMeeting],
+    [meetingState.active, onToggleMeeting, selectMeeting, setMeetings],
   );
 
   const handleStartFromEvent = useCallback(
@@ -559,16 +599,16 @@ export function MeetingNotesSection({
         prev.map((m) => (m.id === stopped.id ? stopped : m)),
       );
     }
-  }, [meetingState.active, onToggleMeeting]);
+  }, [meetingState.active, onToggleMeeting, setMeetings]);
 
   const handleSaved = useCallback((updated: MeetingRecord) => {
     setMeetings((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
-  }, []);
+  }, [setMeetings]);
 
   const handleDeleted = useCallback((id: number) => {
     setMeetings((prev) => prev.filter((m) => m.id !== id));
     setSelectedId((prev) => (prev === id ? null : prev));
-  }, []);
+  }, [setMeetings]);
 
   const handleMerged = useCallback(
     (merged: MeetingRecord, sourceIds: number[]) => {
@@ -587,12 +627,15 @@ export function MeetingNotesSection({
         prev !== null && removeIds.has(prev) ? merged.id : prev,
       );
     },
-    [],
+    [setMeetings],
   );
 
   const handleLoadMore = useCallback(() => {
+    // A retained list is about to be replaced by this visit's first page; an
+    // offset taken from it would leave a gap or be thrown away.
+    if (!listRefreshed) return;
     void fetchPage(meetings.length, true, appliedQuery);
-  }, [meetings.length, fetchPage, appliedQuery]);
+  }, [listRefreshed, meetings.length, fetchPage, appliedQuery]);
 
   const handleRetry = useCallback(() => {
     setErrorText(null);
@@ -642,9 +685,10 @@ export function MeetingNotesSection({
     [upcoming, meetingState.active, activeMeeting],
   );
   const comingUpStatus = useMemo<ComingUpStatus>(() => {
+    if (calendarStatus === "error" && !calendarChecked) return "loading";
     if (calendarStatus === "ready" && comingUp.length === 0) return "empty";
     return calendarStatus;
-  }, [calendarStatus, comingUp.length]);
+  }, [calendarChecked, calendarStatus, comingUp.length]);
 
   if (loading) {
     return (

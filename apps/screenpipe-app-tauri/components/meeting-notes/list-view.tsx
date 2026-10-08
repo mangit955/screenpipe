@@ -93,13 +93,26 @@ export function ListView({
       <div className="max-w-3xl mx-auto px-12 py-10">
         <header className="mb-8">
           {meetingActive && activeMeeting ? (
-            <RecordingStrip
-              meeting={activeMeeting}
-              onOpen={() => onSelect(activeMeeting.id)}
-              onStop={onStop}
-              stopping={starting}
-              captureState={captureState}
-            />
+            <div className="space-y-3">
+              <RecordingStrip
+                meeting={activeMeeting}
+                onOpen={() => onSelect(activeMeeting.id)}
+                onStop={onStop}
+                stopping={starting}
+                captureState={captureState}
+              />
+              {/* A search from before the meeting started still filters the
+                  list, so it stays visible and clearable. */}
+              {isSearchActive && (
+                <div className="flex justify-end">
+                  <SearchBar
+                    value={searchInput}
+                    onChange={onSearchInputChange}
+                    searching={searching}
+                  />
+                </div>
+              )}
+            </div>
           ) : (
             !trulyEmpty && (
               <div className="flex items-center justify-end gap-2">

@@ -2,7 +2,7 @@
 // https://screenpipe.com
 
 import React from "react";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ListView } from "./list-view";
 import { computeLiveCaptureState } from "@/lib/utils/live-capture-state";
@@ -58,5 +58,27 @@ describe("meeting recording indicator", () => {
     const { container, rerender } = render(<ListView {...props} captureState={captureState("recording")} />);
     rerender(<ListView {...props} meetingActive={false} />);
     expect(container.querySelector(".meeting-listening-stick")).toBeNull();
+  });
+
+  it("keeps a search that filters the list visible and clearable", () => {
+    const onSearchInputChange = vi.fn();
+    render(
+      <ListView
+        {...props}
+        searchInput="standup"
+        hasSearchQuery
+        onSearchInputChange={onSearchInputChange}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText("Search by title, email, note…")).toHaveValue("standup");
+    fireEvent.click(screen.getByRole("button", { name: "Close search" }));
+    expect(onSearchInputChange).toHaveBeenCalledWith("");
+  });
+
+  it("leaves the header to the recording strip without a search", () => {
+    render(<ListView {...props} />);
+    expect(screen.queryByPlaceholderText("Search by title, email, note…")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Search meetings" })).toBeNull();
   });
 });
