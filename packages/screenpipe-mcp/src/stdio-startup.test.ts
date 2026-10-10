@@ -450,7 +450,9 @@ describe("stdio startup handshake", { timeout: INIT_DEADLINE_MS + 2_000 }, () =>
     );
     const list = runtime.match(/const SCREENPIPE_MCP_READ_TOOLS: &\[&str\] = &\[([^\]]*)\];/)?.[1];
     expect(list, "SCREENPIPE_MCP_READ_TOOLS in runtime.rs").toBeDefined();
-    const autoApproved = [...list!.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    // A commented-out entry isn't listed.
+    const entries = list!.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    const autoApproved = [...entries.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
     expect(
       autoApproved.sort(),
       "runtime.rs SCREENPIPE_MCP_READ_TOOLS: list a tool only after checking its handler only reads",
